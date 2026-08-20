@@ -7,7 +7,7 @@ Qt desktop UI
     │
     ├── EffectEngine worker thread
     │       ├── Timed brightness patterns
-    │       ├── Windows keyboard hook (React only)
+    │       ├── Windows keyboard hook (Reactive and Default Backlight)
     │       ├── PortAudio input (Music · Mic only)
     │       └── Windows Core Audio peak meter (Music · Speaker only)
     │
@@ -37,7 +37,13 @@ Effects execute on a daemon worker thread. The controller serializes hardware wr
 - Music · Mic uses `sounddevice.RawInputStream` with 16-bit mono input. RMS is calculated in memory.
 - Music · Speaker uses `IAudioMeterInformation::GetPeakValue` on the current Windows render endpoint through `pycaw`.
 
-Both sources feed the same adaptive floor/peak normalization and map the result to the three hardware levels.
+Microphone energy uses adaptive floor/peak normalization. Speaker mode compares fast and slow output envelopes to identify sudden beat-like attacks, applies a short adaptive cooldown, and turns each onset into a bright/dim pulse. Core Audio exposes only the endpoint peak here, so no speaker samples are captured or stored.
+
+## Battery saver and startup
+
+Default Backlight uses the existing global keyboard hook to refresh its activity timestamp. The worker holds full brightness during activity, switches off after 10 seconds without a keypress, and wakes immediately on the next keydown.
+
+The startup toggle creates or removes a per-user Windows Task Scheduler entry with `ONLOGON` and `HIGHEST` settings. No background service is installed.
 
 ## Packaging
 

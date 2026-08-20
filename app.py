@@ -25,7 +25,7 @@ from PySide6.QtGui import (
     QPen, QRadialGradient,
 )
 from PySide6.QtWidgets import (
-    QApplication, QButtonGroup, QFrame, QGridLayout, QGroupBox,
+    QAbstractButton, QApplication, QButtonGroup, QCheckBox, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QRadioButton,
     QProgressBar, QSizePolicy, QSlider, QVBoxLayout, QWidget,
 )
@@ -88,6 +88,55 @@ def is_admin():
 def resource_path(relative_path):
     base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base, relative_path)
+
+
+STARTUP_TASK_NAME = "Lenovo LOQ Backlit Effects - Thrash"
+
+
+def _hidden_process_kwargs():
+    return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
+
+
+def startup_task_enabled():
+    """Return whether the per-user Windows logon task exists."""
+    try:
+        result = subprocess.run(
+            ["schtasks", "/Query", "/TN", STARTUP_TASK_NAME],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            **_hidden_process_kwargs(),
+        )
+        return result.returncode == 0
+    except OSError:
+        return False
+
+
+def set_startup_task(enabled):
+    """Create or remove the elevated per-user Windows logon task."""
+    if enabled:
+        if getattr(sys, "frozen", False):
+            target = f'"{sys.executable}"'
+        else:
+            target = f'"{sys.executable}" "{os.path.abspath(__file__)}"'
+        command = [
+            "schtasks", "/Create", "/TN", STARTUP_TASK_NAME,
+            "/TR", target, "/SC", "ONLOGON", "/RL", "HIGHEST", "/F",
+        ]
+    else:
+        command = ["schtasks", "/Delete", "/TN", STARTUP_TASK_NAME, "/F"]
+
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        check=False,
+        **_hidden_process_kwargs(),
+    )
+    if result.returncode != 0 and not (not enabled and result.returncode == 1):
+        detail = (result.stderr or result.stdout or "Task Scheduler rejected the request").strip()
+        raise RuntimeError(detail)
+    return enabled
 
 # ---------------------------------------------------------------------------
 #  Dynamic DLL path finder
@@ -337,20 +386,21 @@ class KeyboardBacklightController:
 
 class EffectEngine:
     EFFECTS_META = [
-        {"id": "blink",     "name": "Blink",        "icon": "💡",     "desc": "Classic on / off blinking"},
-        {"id": "breathe",   "name": "Breathe",      "icon": "🌊",   "desc": "Smooth fade in and out"},
-        {"id": "strobe",    "name": "Strobe",        "icon": "⚡",    "desc": "Rapid strobe flashing"},
-        {"id": "heartbeat", "name": "Heartbeat",     "icon": "💓", "desc": "Double-pulse heartbeat rhythm"},
-        {"id": "sos",       "name": "SOS",           "icon": "🆘",       "desc": "Morse code SOS signal"},
-        {"id": "disco",     "name": "Disco",         "icon": "🪩",     "desc": "Random chaotic flashing"},
-        {"id": "lightning", "name": "Lightning",     "icon": "🌩️",   "desc": "Random lightning strikes"},
-        {"id": "pulse",     "name": "Pulse",         "icon": "📡",     "desc": "Quick flash, slow fade"},
-        {"id": "candle",    "name": "Candle",        "icon": "🕯️",    "desc": "Flickering candle flame"},
-        {"id": "binary",    "name": "Binary Clock",  "icon": "🔢",    "desc": "Blinks seconds in binary"},
-        {"id": "wave",      "name": "Wave",          "icon": "〰️",    "desc": "Rolling brightness crest"},
-        {"id": "reactive",  "name": "React",         "icon": "⌨️",     "desc": "On all time, blinks off on typing"},
-        {"id": "music_mic", "name": "Music · Mic",   "icon": "🎙",      "desc": "Reacts to the default microphone"},
-        {"id": "music_speaker", "name": "Music · Speaker", "icon": "◖))", "desc": "Reacts directly to Windows speaker output"},
+        {"id": "default",   "name": "Default Backlight", "icon": "◉",  "desc": "Normal light with 10-second idle sleep"},
+        {"id": "blink",     "name": "Blink",          "icon": "●",     "desc": "Classic on-and-off blinking"},
+        {"id": "breathe",   "name": "Breathe",        "icon": "◌",     "desc": "Smooth fade in and out"},
+        {"id": "strobe",    "name": "Strobe",         "icon": "ϟ",     "desc": "Rapid strobe flashing"},
+        {"id": "heartbeat", "name": "Heartbeat",      "icon": "♥",     "desc": "Double-pulse heartbeat rhythm"},
+        {"id": "sos",       "name": "SOS",            "icon": "···",   "desc": "Morse code emergency signal"},
+        {"id": "disco",     "name": "Disco",          "icon": "✦",     "desc": "Random high-energy flashing"},
+        {"id": "lightning", "name": "Lightning",      "icon": "↯",     "desc": "Random lightning strikes"},
+        {"id": "pulse",     "name": "Pulse",          "icon": "◍",     "desc": "Quick flash with a slow fade"},
+        {"id": "candle",    "name": "Candle",         "icon": "♨",     "desc": "Warm flickering rhythm"},
+        {"id": "binary",    "name": "Binary Clock",   "icon": "01",    "desc": "Encodes seconds in binary"},
+        {"id": "wave",      "name": "Wave",           "icon": "≈",     "desc": "Rolling brightness crest"},
+        {"id": "reactive",  "name": "Reactive",       "icon": "⌨",     "desc": "Responds instantly to typing"},
+        {"id": "music_mic", "name": "Music / Mic",    "icon": "♪",     "desc": "Follows the default microphone"},
+        {"id": "music_speaker", "name": "Music / Speaker", "icon": "♫", "desc": "Beat detection from speaker output"},
     ]
 
     def __init__(self, ctrl):
@@ -378,6 +428,16 @@ class EffectEngine:
         self._speaker_meter = None
         self._speaker_device = None
         self._speaker_com_initialized = False
+        self._speaker_fast = 0.0
+        self._speaker_slow = 0.0
+        self._speaker_deviation = 0.01
+        self._speaker_last_beat = 0.0
+        self._speaker_flash_until = 0.0
+        self._speaker_glow_until = 0.0
+        self._idle_started = time.monotonic()
+        self._default_level = None
+        self.idle_sleeping = False
+        self.idle_seconds = 0.0
         self.music_level = 0.0
         self.last_error = None
 
@@ -393,14 +453,24 @@ class EffectEngine:
         self.last_error = None
         self._music_floor = 0.01
         self._music_peak = 0.05
+        self._speaker_fast = 0.0
+        self._speaker_slow = 0.0
+        self._speaker_deviation = 0.01
+        self._speaker_last_beat = 0.0
+        self._speaker_flash_until = 0.0
+        self._speaker_glow_until = 0.0
+        self._idle_started = time.monotonic()
+        self._default_level = None
+        self.idle_sleeping = False
+        self.idle_seconds = 0.0
         self.music_level = 0.0
         with self._keys_lock:
             self._pressed_keys.clear()
         self.running = True
         self._stop.clear()
 
-        # Start global keyboard hook if reactive mode is selected
-        if self.current_effect == "reactive":
+        # Reactive and battery-saving default modes both need global input.
+        if self.current_effect in ("reactive", "default"):
             self._start_keyboard_hook()
 
         self._thread = threading.Thread(target=self._loop, daemon=True)
@@ -424,6 +494,7 @@ class EffectEngine:
 
     def _loop(self):
         fns = {
+            "default": self._default_backlight,
             "blink": self._blink, "breathe": self._breathe,
             "strobe": self._strobe, "heartbeat": self._heartbeat,
             "sos": self._sos, "disco": self._disco,
@@ -515,6 +586,24 @@ class EffectEngine:
         self._hook_thread_id = None
 
     # -- Effects ------------------------------------------------------------
+
+    def _default_backlight(self):
+        """Keep normal backlight on, sleep after 10 idle seconds, wake on input."""
+        if self._keypress_event.is_set():
+            self._keypress_event.clear()
+            self._idle_started = time.monotonic()
+            self.idle_seconds = 0.0
+            if self.idle_sleeping:
+                self.idle_sleeping = False
+
+        self.idle_seconds = max(0.0, time.monotonic() - self._idle_started)
+        if self.idle_seconds >= 10.0 and not self.idle_sleeping:
+            self.idle_sleeping = True
+        desired_level = 0 if self.idle_sleeping else 2
+        if desired_level != self._default_level:
+            self.ctrl.set_brightness(desired_level)
+            self._default_level = desired_level
+        return self._wait(0.1)
 
     def _blink(self):
         d = 0.5 / self.speed
@@ -643,7 +732,7 @@ class EffectEngine:
         return False
 
     def _music_speaker(self):
-        """Read the Windows render-endpoint peak without using the microphone."""
+        """Detect beat-like output transients without opening the microphone."""
         if self._speaker_meter is None:
             try:
                 from ctypes import POINTER, cast
@@ -663,8 +752,50 @@ class EffectEngine:
                 raise RuntimeError(f"Could not monitor Windows speaker output: {exc}") from exc
 
         peak = float(self._speaker_meter.GetPeakValue())
-        self._apply_music_intensity(peak)
-        return self._wait(0.025)
+        self._apply_speaker_beat(peak)
+        return self._wait(0.020)
+
+    def _apply_speaker_beat(self, raw_level, now=None):
+        """Turn endpoint peaks into adaptive, debounced beat pulses."""
+        now = time.monotonic() if now is None else float(now)
+        raw_level = max(0.0, min(1.0, float(raw_level)))
+
+        # The fast envelope follows drum attacks; the slow envelope tracks the
+        # song's current loudness. Their separation is an onset, not just volume.
+        self._speaker_fast = self._speaker_fast * 0.48 + raw_level * 0.52
+        self._speaker_slow = self._speaker_slow * 0.94 + raw_level * 0.06
+        onset = max(0.0, self._speaker_fast - self._speaker_slow)
+        self._speaker_deviation = self._speaker_deviation * 0.94 + onset * 0.06
+
+        sensitivity = max(0.2, min(4.0, self.speed))
+        threshold = (
+            0.006 + self._speaker_slow * 0.15 + self._speaker_deviation * 1.10
+        ) / (0.72 + sensitivity * 0.34)
+        refractory = max(0.095, 0.24 - sensitivity * 0.028)
+        is_beat = (
+            raw_level >= 0.018
+            and onset >= threshold
+            and now - self._speaker_last_beat >= refractory
+        )
+
+        if is_beat:
+            self._speaker_last_beat = now
+            self._speaker_flash_until = now + 0.075
+            self._speaker_glow_until = now + 0.19
+
+        if now < self._speaker_flash_until:
+            level = 2
+            target_meter = 1.0
+        elif now < self._speaker_glow_until:
+            level = 1
+            target_meter = 0.48
+        else:
+            level = 0
+            target_meter = min(0.28, raw_level * 1.8)
+
+        self.music_level = self.music_level * 0.34 + target_meter * 0.66
+        self.ctrl.set_brightness(level)
+        return is_beat
 
     def _apply_music_intensity(self, raw_level):
         """Normalize either microphone RMS or speaker peak into three hardware levels."""
@@ -762,6 +893,8 @@ class EffectEngine:
             "current_effect": self.current_effect,
             "speed": self.speed,
             "music_level": self.music_level,
+            "idle_sleeping": self.idle_sleeping,
+            "idle_seconds": self.idle_seconds,
             "last_error": self.last_error,
         }
 
@@ -772,6 +905,66 @@ class EffectEngine:
 controller = None
 engine = None
 window = None
+
+
+class EffectCard(QAbstractButton):
+    """A modern two-line lighting-mode card with consistent monochrome icons."""
+
+    def __init__(self, effect, parent=None):
+        super().__init__(parent)
+        self.effect = effect
+        self.setCheckable(True)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMinimumHeight(68)
+        self.setToolTip(effect["desc"])
+        self.setAccessibleName(effect["name"])
+        self.setAccessibleDescription(effect["desc"])
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.75, 0.75, -0.75, -0.75)
+
+        if self.isChecked():
+            background = QLinearGradient(rect.topLeft(), rect.bottomRight())
+            background.setColorAt(0.0, QColor("#123a51"))
+            background.setColorAt(1.0, QColor("#0b2638"))
+            border = QColor("#55c9ff")
+            name_color = QColor("#f5fbff")
+            desc_color = QColor("#a9daf2")
+            icon_color = QColor("#67d3ff")
+        elif self.underMouse():
+            background = QColor(23, 36, 53, 248)
+            border = QColor(62, 115, 153)
+            name_color = QColor("#f3f8fc")
+            desc_color = QColor("#aebfd0")
+            icon_color = QColor("#75d6ff")
+        else:
+            background = QColor(15, 24, 37, 238)
+            border = QColor(66, 89, 116, 135)
+            name_color = QColor("#e8f0f7")
+            desc_color = QColor("#8fa3b8")
+            icon_color = QColor("#5fc9f5")
+
+        painter.setPen(QPen(border, 1.2))
+        painter.setBrush(background)
+        painter.drawRoundedRect(rect, 14, 14)
+
+        icon_rect = QRectF(rect.left() + 15, rect.top() + 13, 28, 42)
+        painter.setFont(QFont("Segoe UI Symbol", 14, QFont.DemiBold))
+        painter.setPen(icon_color)
+        painter.drawText(icon_rect, Qt.AlignLeft | Qt.AlignVCenter, self.effect["icon"])
+
+        text_left = rect.left() + 49
+        name_rect = QRectF(text_left, rect.top() + 12, rect.width() - 62, 22)
+        desc_rect = QRectF(text_left, rect.top() + 34, rect.width() - 62, 21)
+        painter.setFont(QFont("Segoe UI Variable Text", 9, QFont.DemiBold))
+        painter.setPen(name_color)
+        painter.drawText(name_rect, Qt.AlignLeft | Qt.AlignVCenter, self.effect["name"])
+        painter.setFont(QFont("Segoe UI Variable Text", 7.8, QFont.Normal))
+        painter.setPen(desc_color)
+        painter.drawText(desc_rect, Qt.AlignLeft | Qt.AlignVCenter, self.effect["desc"])
+        painter.end()
 
 
 class AmbientBackground(QWidget):
@@ -859,8 +1052,8 @@ class BootSplash(QWidget):
         glow.setColorAt(1, QColor(31, 155, 255, 0))
         painter.fillRect(panel, glow)
 
-        logo_font = QFont("Segoe UI Variable Display", 62, QFont.Black)
-        logo_font.setLetterSpacing(QFont.AbsoluteSpacing, 8)
+        logo_font = QFont("Segoe UI Variable Display", 58, QFont.Bold)
+        logo_font.setLetterSpacing(QFont.AbsoluteSpacing, 7)
         painter.setFont(logo_font)
         painter.setPen(QColor(235, 247, 255, int(255 * eased)))
         painter.drawText(QRectF(0, 105, self.width(), 100), Qt.AlignCenter, "LOQ")
@@ -870,10 +1063,10 @@ class BootSplash(QWidget):
         painter.drawLine(int(slash_x - 12), 128, int(slash_x + 12), 184)
 
         sub_alpha = int(255 * max(0, min(1, (progress - 0.28) / 0.4)))
-        painter.setFont(QFont("Segoe UI Variable Text", 11, QFont.DemiBold))
+        painter.setFont(QFont("Segoe UI Variable Text", 10, QFont.Medium))
         painter.setPen(QColor(164, 205, 231, sub_alpha))
         painter.drawText(QRectF(0, 213, self.width(), 34), Qt.AlignCenter,
-                         "BACKLIT EFFECTS  /  THRASH")
+                         "BACKLIT EFFECTS  •  BY THRASH")
 
         track = QRectF(160, 292, 400, 3)
         painter.fillRect(track, QColor(255, 255, 255, 20))
@@ -911,35 +1104,37 @@ class DesktopApplication(QMainWindow):
     def _build_ui(self):
         self.setWindowTitle("Lenovo LOQ Backlit Effects - Thrash")
         self.setWindowIcon(QIcon(resource_path(os.path.join("assets", "app-icon.png"))))
-        self.resize(1080, 820)
-        self.setMinimumSize(900, 720)
+        self.resize(1180, 900)
+        self.setMinimumSize(980, 780)
         self.setStyleSheet("""
             QMainWindow { background: #05070d; }
-            QWidget { color: #eef6ff; font: 10pt 'Segoe UI Variable Text'; }
+            QWidget { color: #e7eef5; font: 9.5pt 'Segoe UI Variable Text'; }
             QLabel { background: transparent; color: #f1f5f9; }
-            QLabel#title { font: 700 25pt 'Segoe UI Variable Display'; color: #f8fbff; }
+            QLabel#eyebrow { color: #55c9ff; font: 600 8pt 'Segoe UI Variable Text'; letter-spacing: 2px; }
+            QLabel#title { font: 650 27pt 'Segoe UI Variable Display'; color: #f8fbff; }
             QLabel#subtitle, QLabel#section, QLabel#hint { color: #94a3b8; }
-            QLabel#section { font: 650 8.5pt 'Segoe UI Variable Text'; letter-spacing: 1px; }
-            QLabel#brand { color: #7dd3fc; background: rgba(14, 45, 67, 210);
-                           border: 1px solid #256b91; border-radius: 13px;
-                           padding: 8px 13px; font: 750 9pt 'Segoe UI Variable Text'; }
+            QLabel#section { font: 600 8pt 'Segoe UI Variable Text'; letter-spacing: 1.5px; }
+            QFrame#brandChip { background: rgba(14, 31, 46, 225); border: 1px solid #24516d;
+                               border-radius: 14px; }
+            QLabel#brandMark { color: #56c9ff; font: 700 15pt 'Segoe UI Variable Display'; }
+            QLabel#brandWord { color: #d8e8f3; font: 600 8pt 'Segoe UI Variable Text'; letter-spacing: 1px; }
             QLabel#connectionDot { color: #2dd4bf; font-size: 15px; }
             QFrame#panel, QGroupBox { background: rgba(14, 20, 31, 232);
                                      border: 1px solid rgba(94, 129, 163, 72); border-radius: 17px; }
+            QFrame#notice { background: rgba(11, 31, 45, 210); border: 1px solid rgba(63, 142, 184, 90);
+                            border-radius: 12px; }
             QGroupBox { margin-top: 10px; padding: 14px 10px 10px; }
             QGroupBox::title { subcontrol-origin: margin; left: 12px; color: #94a3b8; padding: 0 5px; }
             QRadioButton { background: transparent; padding: 8px; }
             QRadioButton:hover { color: #67c5ff; }
+            QCheckBox { spacing: 9px; color: #b7c8d8; padding: 4px; }
+            QCheckBox::indicator { width: 17px; height: 17px; border: 1px solid #4c6680;
+                                   border-radius: 5px; background: #0c1521; }
+            QCheckBox::indicator:checked { background: #38bdf8; border-color: #70d5ff; }
             QPushButton { background: rgba(31, 42, 58, 235); border: 1px solid rgba(95, 123, 153, 45);
-                          border-radius: 11px; padding: 11px 17px; font-weight: 600; }
+                          border-radius: 11px; padding: 11px 17px; font: 600 8.5pt 'Segoe UI Variable Text'; }
             QPushButton:hover { background: rgba(42, 58, 80, 245); border-color: rgba(94, 186, 238, 100); }
-            QPushButton[effect="true"] { text-align: left; background: rgba(20, 29, 43, 235);
-                                         color: #dce8f4; border: 1px solid rgba(76, 104, 137, 75);
-                                         padding: 11px 13px; font: 600 9.5pt 'Segoe UI Variable Text'; }
-            QPushButton[effect="true"]:hover { background: rgba(27, 44, 64, 245); border-color: #326486; }
-            QPushButton[effect="true"]:checked { background: rgba(13, 64, 91, 245); color: #a5e4ff;
-                                                 border: 1px solid #38bdf8; }
-            QPushButton#start { background: #38bdf8; color: #041019; font-weight: 750; border: 0; }
+            QPushButton#start { background: #38bdf8; color: #041019; font: 700 9pt 'Segoe UI Variable Text'; border: 0; }
             QPushButton#start:hover { background: #7dd3fc; }
             QPushButton#start[running="true"] { background: #fb7185; color: #19070a; }
             QSlider::groove:horizontal { height: 5px; background: #263349; border-radius: 2px; }
@@ -958,16 +1153,29 @@ class DesktopApplication(QMainWindow):
 
         header = QHBoxLayout()
         heading = QVBoxLayout()
-        title = QLabel("Lenovo LOQ Backlit Effects")
+        heading.setSpacing(3)
+        eyebrow = QLabel("LENOVO LOQ  /  NATIVE WINDOWS")
+        eyebrow.setObjectName("eyebrow")
+        title = QLabel("Backlit Effects")
         title.setObjectName("title")
-        subtitle = QLabel("Precision lighting studio  •  single-zone keyboard")
+        subtitle = QLabel("Precision control for your single-zone keyboard")
         subtitle.setObjectName("subtitle")
+        heading.addWidget(eyebrow)
         heading.addWidget(title)
         heading.addWidget(subtitle)
-        brand = QLabel("THRASH")
-        brand.setObjectName("brand")
-        brand.setAlignment(Qt.AlignCenter)
-        brand.setFixedWidth(96)
+
+        brand = QFrame()
+        brand.setObjectName("brandChip")
+        brand.setFixedSize(126, 50)
+        brand_layout = QHBoxLayout(brand)
+        brand_layout.setContentsMargins(13, 6, 13, 6)
+        brand_layout.setSpacing(9)
+        brand_mark = QLabel("T/")
+        brand_mark.setObjectName("brandMark")
+        brand_word = QLabel("THRASH")
+        brand_word.setObjectName("brandWord")
+        brand_layout.addWidget(brand_mark)
+        brand_layout.addWidget(brand_word)
         header.addLayout(heading)
         header.addStretch()
         header.addWidget(brand, 0, Qt.AlignVCenter)
@@ -992,7 +1200,7 @@ class DesktopApplication(QMainWindow):
         effects_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         effects_layout = QVBoxLayout(effects_panel)
         effects_layout.setContentsMargins(16, 15, 16, 16)
-        section = QLabel("EFFECT")
+        section = QLabel("LIGHTING MODES")
         section.setObjectName("section")
         section.setFixedHeight(20)
         effects_layout.addWidget(section)
@@ -1005,22 +1213,18 @@ class DesktopApplication(QMainWindow):
         grid.setHorizontalSpacing(8)
         grid.setVerticalSpacing(8)
         for index, effect in enumerate(EffectEngine.EFFECTS_META):
-            button = QPushButton(f"{effect['icon']}  {effect['name']}\n    {effect['desc']}")
-            button.setCheckable(True)
-            button.setProperty("effect", True)
+            button = EffectCard(effect)
             button.setProperty("effect_id", effect["id"])
-            button.setToolTip(effect["desc"])
-            button.setMinimumHeight(62)
             self.effect_buttons.addButton(button, index)
             grid.addWidget(button, index // 4, index % 4)
-            if effect["id"] == "blink":
+            if effect["id"] == "default":
                 button.setChecked(True)
         self.effect_buttons.buttonClicked.connect(self._effect_changed)
         effects_layout.addWidget(grid_widget)
 
-        speed_header_widget = QWidget()
-        speed_header_widget.setFixedHeight(24)
-        speed_header = QHBoxLayout(speed_header_widget)
+        self.speed_header_widget = QWidget()
+        self.speed_header_widget.setFixedHeight(24)
+        speed_header = QHBoxLayout(self.speed_header_widget)
         speed_header.setContentsMargins(0, 0, 0, 0)
         self.speed_title = QLabel("SPEED")
         self.speed_title.setObjectName("section")
@@ -1028,7 +1232,7 @@ class DesktopApplication(QMainWindow):
         speed_header.addWidget(self.speed_title)
         speed_header.addStretch()
         speed_header.addWidget(self.speed_label)
-        effects_layout.addWidget(speed_header_widget)
+        effects_layout.addWidget(self.speed_header_widget)
 
         self.speed_slider = QSlider(Qt.Horizontal)
         self.speed_slider.setRange(2, 40)
@@ -1047,6 +1251,20 @@ class DesktopApplication(QMainWindow):
         music_layout.addWidget(self.music_hint)
         music_layout.addWidget(self.music_meter)
         effects_layout.addWidget(self.music_panel)
+
+        self.default_panel = QFrame()
+        self.default_panel.setObjectName("notice")
+        default_layout = QHBoxLayout(self.default_panel)
+        default_layout.setContentsMargins(14, 9, 14, 9)
+        default_icon = QLabel("◉")
+        default_icon.setStyleSheet("color: #5ed1ff; font-size: 14px;")
+        self.default_hint = QLabel(
+            "BATTERY SAVER  •  normal bright backlight  •  sleeps after 10 seconds idle  •  wakes on any key"
+        )
+        self.default_hint.setObjectName("hint")
+        default_layout.addWidget(default_icon)
+        default_layout.addWidget(self.default_hint, 1)
+        effects_layout.addWidget(self.default_panel)
 
         self.reactive_panel = QGroupBox("REACTIVE OPTIONS")
         reactive_layout = QVBoxLayout(self.reactive_panel)
@@ -1077,19 +1295,31 @@ class DesktopApplication(QMainWindow):
         effects_layout.addWidget(self.reactive_panel)
         layout.addWidget(effects_panel)
 
+        preferences = QHBoxLayout()
+        preferences.setContentsMargins(4, 0, 4, 0)
+        self.startup_checkbox = QCheckBox("RUN AT WINDOWS STARTUP")
+        self.startup_checkbox.setChecked(startup_task_enabled())
+        self.startup_checkbox.toggled.connect(self._set_startup)
+        startup_note = QLabel("Launches elevated through Windows Task Scheduler")
+        startup_note.setObjectName("hint")
+        preferences.addWidget(self.startup_checkbox)
+        preferences.addWidget(startup_note)
+        preferences.addStretch()
+        layout.addLayout(preferences)
+
         actions = QHBoxLayout()
-        self.start_button = QPushButton("Start effect")
+        self.start_button = QPushButton("START MODE")
         self.start_button.setObjectName("start")
         self.start_button.clicked.connect(self.toggle_effect)
-        light_button = QPushButton("Light on/off")
+        light_button = QPushButton("LIGHT ON / OFF")
         light_button.clicked.connect(self.toggle_light)
-        detect_button = QPushButton("Re-detect")
+        detect_button = QPushButton("RE-DETECT")
         detect_button.clicked.connect(self.redetect)
         actions.addWidget(self.start_button, 1)
         actions.addWidget(light_button)
         actions.addWidget(detect_button)
         layout.addLayout(actions)
-        footer = QLabel("THRASH LABS   /   v2.0   /   LOCAL HARDWARE CONTROL")
+        footer = QLabel("THRASH  •  VERSION 2.1  •  PRIVATE, LOCAL HARDWARE CONTROL")
         footer.setObjectName("hint")
         footer.setAlignment(Qt.AlignCenter)
         layout.addWidget(footer)
@@ -1116,11 +1346,15 @@ class DesktopApplication(QMainWindow):
         self.reactive_panel.setVisible(effect == "reactive")
         is_music = bool(effect and effect.startswith("music_"))
         self.music_panel.setVisible(is_music)
+        is_default = effect == "default"
+        self.default_panel.setVisible(is_default)
+        self.speed_header_widget.setVisible(not is_default)
+        self.speed_slider.setVisible(not is_default)
         self.speed_title.setText("SENSITIVITY" if is_music else "SPEED")
         if effect == "music_mic":
-            self.music_hint.setText("DEFAULT MICROPHONE  •  reacts to sound around the laptop")
+            self.music_hint.setText("DEFAULT MICROPHONE  •  follows nearby sound energy")
         elif effect == "music_speaker":
-            self.music_hint.setText("WINDOWS SPEAKER OUTPUT  •  no microphone recording")
+            self.music_hint.setText("BEAT DETECTION  •  adaptive output transients  •  no microphone recording")
         self._restart_if_running()
 
     def _speed_changed(self, value):
@@ -1148,8 +1382,8 @@ class DesktopApplication(QMainWindow):
                 self.hold_buttons.checkedId(),
             )
             effect_name = next(item["name"] for item in EffectEngine.EFFECTS_META if item["id"] == effect)
-            self.state_label.setText(f"Running  /  {effect_name}")
-            self.start_button.setText("Stop effect")
+            self.state_label.setText(f"ACTIVE  /  {effect_name.upper()}")
+            self.start_button.setText("STOP MODE")
             self.start_button.setProperty("running", True)
             self.start_button.style().unpolish(self.start_button)
             self.start_button.style().polish(self.start_button)
@@ -1158,8 +1392,8 @@ class DesktopApplication(QMainWindow):
 
     def stop_effect(self):
         self.engine.stop()
-        self.state_label.setText("Ready")
-        self.start_button.setText("Start effect")
+        self.state_label.setText("READY")
+        self.start_button.setText("START MODE")
         self.start_button.setProperty("running", False)
         self.start_button.style().unpolish(self.start_button)
         self.start_button.style().polish(self.start_button)
@@ -1167,12 +1401,22 @@ class DesktopApplication(QMainWindow):
     def toggle_effect(self):
         self.stop_effect() if self.engine.running else self.start_effect()
 
+    def _set_startup(self, enabled):
+        try:
+            set_startup_task(enabled)
+            self.state_label.setText("STARTUP  /  ENABLED" if enabled else "STARTUP  /  DISABLED")
+        except Exception as exc:
+            self.startup_checkbox.blockSignals(True)
+            self.startup_checkbox.setChecked(not enabled)
+            self.startup_checkbox.blockSignals(False)
+            QMessageBox.warning(self, "Startup setting failed", str(exc))
+
     def toggle_light(self):
         if self.engine.running:
             self.stop_effect()
         self.light_on = not self.light_on
         if self.ctrl.set_backlight(self.light_on):
-            self.state_label.setText("Light on" if self.light_on else "Light off")
+            self.state_label.setText("LIGHT  /  ON" if self.light_on else "LIGHT  /  OFF")
         else:
             QMessageBox.warning(self, "Controller unavailable", "The keyboard command was not accepted.")
 
@@ -1192,15 +1436,25 @@ class DesktopApplication(QMainWindow):
         else:
             self.connection_dot.setStyleSheet("color: #fb7185;")
         self.music_meter.setValue(int(self.engine.music_level * 100))
+        if self.engine.running and self.engine.current_effect == "default":
+            if self.engine.idle_sleeping:
+                self.state_label.setText("BATTERY SAVER  /  SLEEPING")
+            else:
+                remaining = max(0, 10 - int(self.engine.idle_seconds))
+                self.state_label.setText(f"DEFAULT  /  IDLE SLEEP IN {remaining}s")
         if self.engine.last_error and self.engine.last_error != self._shown_error:
             self._shown_error = self.engine.last_error
             self.state_label.setText("Effect stopped")
-            self.start_button.setText("Start effect")
+            self.start_button.setText("START MODE")
             self.start_button.setProperty("running", False)
             self.start_button.style().unpolish(self.start_button)
             self.start_button.style().polish(self.start_button)
             QMessageBox.warning(self, "Effect stopped", self.engine.last_error)
-        if not self.engine.running and self.state_label.text().startswith("Running"):
+        if not self.engine.running and (
+            self.state_label.text().startswith("ACTIVE")
+            or self.state_label.text().startswith("DEFAULT")
+            or self.state_label.text().startswith("BATTERY SAVER")
+        ):
             self.stop_effect()
 
     def closeEvent(self, event):
