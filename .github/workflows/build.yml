@@ -1,0 +1,42 @@
+name: Build Windows application
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install build dependencies
+        run: python -m pip install -r requirements-build.txt
+
+      - name: Compile-check source
+        run: python -m py_compile app.py diagnose_vantage.py
+
+      - name: Build unsigned executable
+        run: python -m PyInstaller --clean --noconfirm keyboard-effects.spec
+
+      - name: Upload unsigned build
+        uses: actions/upload-artifact@v4
+        with:
+          name: LenovoLOQBacklitEffects-Thrash-unsigned
+          path: dist/LenovoLOQBacklitEffects-Thrash.exe
+          if-no-files-found: error

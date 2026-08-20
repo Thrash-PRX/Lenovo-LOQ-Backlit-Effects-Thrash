@@ -1,0 +1,3 @@
+PySide6>=6.8,<7
+sounddevice>=0.5,<1
+pycaw==20251023

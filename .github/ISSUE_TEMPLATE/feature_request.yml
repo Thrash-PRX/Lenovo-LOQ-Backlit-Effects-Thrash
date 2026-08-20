@@ -1,0 +1,22 @@
+name: Feature request
+description: Suggest an effect, interface improvement, or compatibility enhancement
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or goal
+      description: What would this improve for users?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Relevant laptop model, if hardware-specific

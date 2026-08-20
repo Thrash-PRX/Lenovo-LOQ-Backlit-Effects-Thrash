@@ -1,0 +1,50 @@
+name: Bug report
+description: Report a reproducible problem or compatibility failure
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include serial numbers, account information, or unredacted diagnostics.
+  - type: input
+    id: model
+    attributes:
+      label: Laptop model
+      placeholder: Lenovo LOQ 15IAX9 / model identifier 83JC
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version and build
+    validations:
+      required: true
+  - type: input
+    id: vantage
+    attributes:
+      label: Lenovo Vantage version
+    validations:
+      required: true
+  - type: dropdown
+    id: controller
+    attributes:
+      label: Controller status
+      options:
+        - Lenovo bridge online
+        - Connecting to Lenovo Vantage
+        - Compatible interface not found
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      placeholder: Tell us exactly what you selected and what happened.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
