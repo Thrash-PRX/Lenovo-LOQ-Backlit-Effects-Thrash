@@ -34,9 +34,12 @@ Tested on a Lenovo LOQ with model identifier `83JC`. Other models may use differ
 
 1. Open the repository's [Releases](../../releases) page.
 2. Download `LenovoLOQBacklitEffects-Thrash.exe`.
-3. Optionally download `Thrash-Code-Signing.cer` and `SHA256SUMS.txt`.
-4. Verify the SHA-256 checksum before running the application.
-5. Double-click the EXE and accept the administrator prompt.
+3. If the browser blocks the download, open its **Downloads** page (`Ctrl+J`), find the blocked EXE, and choose **Keep**, **Allow download**, or **Download unsafe file**. Confirm the warning only when the file came from this repository.
+4. Optionally download `Thrash-Code-Signing.cer` and `SHA256SUMS.txt`.
+5. Verify the SHA-256 checksum before running the application.
+6. Double-click the EXE and accept the administrator prompt.
+
+> Chrome and Edge may block uncommon self-signed applications automatically. The EXE must sometimes be allowed manually from the browser's Downloads page before it can be installed. This warning is expected for a self-signed release; always verify the checksum first.
 
 The release is signed with a self-signed `CN=Thrash` certificate. A self-signed certificate is not automatically trusted on other computers. Import the included public `.cer` only if you trust this repository and the downloaded checksum matches the release notes. A publicly trusted publisher label requires a commercial CA-issued code-signing certificate.
 
