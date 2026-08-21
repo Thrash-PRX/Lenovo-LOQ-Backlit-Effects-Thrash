@@ -90,6 +90,7 @@ def resource_path(relative_path):
     return os.path.join(base, relative_path)
 
 
+APP_VERSION = "2.1.1"
 STARTUP_TASK_NAME = "Lenovo LOQ Backlit Effects - Thrash"
 
 
@@ -1319,7 +1320,7 @@ class DesktopApplication(QMainWindow):
         actions.addWidget(light_button)
         actions.addWidget(detect_button)
         layout.addLayout(actions)
-        footer = QLabel("THRASH  •  VERSION 2.1  •  PRIVATE, LOCAL HARDWARE CONTROL")
+        footer = QLabel(f"THRASH  •  VERSION {APP_VERSION}  •  PRIVATE, LOCAL HARDWARE CONTROL")
         footer.setObjectName("hint")
         footer.setAlignment(Qt.AlignCenter)
         layout.addWidget(footer)
@@ -1501,6 +1502,7 @@ if __name__ == "__main__":
     qt_app = QApplication(sys.argv)
     qt_app.setApplicationName("Lenovo LOQ Backlit Effects - Thrash")
     qt_app.setApplicationDisplayName("Lenovo LOQ Backlit Effects - Thrash")
+    qt_app.setApplicationVersion(APP_VERSION)
     qt_app.setOrganizationName("Thrash")
     qt_app.setWindowIcon(QIcon(resource_path(os.path.join("assets", "app-icon.png"))))
     qt_app.setFont(QFont("Segoe UI Variable Text", 10))

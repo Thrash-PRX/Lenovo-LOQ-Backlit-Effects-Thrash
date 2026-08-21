@@ -1,0 +1,16 @@
+LENOVO LOQ BACKLIT EFFECTS - THRASH
+
+This installer contains:
+
+• The native Windows application
+• The public Thrash signing certificate
+• SHA-256 verification information
+• README and MIT license
+• Start-menu and optional desktop shortcuts
+• A standard Windows uninstaller
+
+The included certificate is NOT silently added to a trusted certificate store.
+Trusting a self-signed publisher is a security decision that must remain under
+the user's control. Verify the installer checksum before continuing.
+
+Lenovo Vantage and administrator access are required for hardware control.

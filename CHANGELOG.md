@@ -2,13 +2,14 @@
 
 All notable user-facing changes are documented here.
 
-## [2.1.0] - 2026-08-21
+## [2.1.1] - 2026-08-21
 
 ### Added
 
 - Default Backlight mode with automatic 10-second idle sleep and keypress wake
 - Run at Windows Startup toggle backed by an elevated per-user scheduled task
 - Adaptive speaker beat detection with transient onset tracking and beat cooldown
+- Single LZMA2-compressed Windows installer containing the app and verification files
 
 ### Changed
 

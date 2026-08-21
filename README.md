@@ -12,7 +12,7 @@
   <img alt="Windows 10/11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-38bdf8">
   <img alt="Python 3.10+" src="https://img.shields.io/badge/Python-3.10%2B-3776AB">
   <img alt="License MIT" src="https://img.shields.io/badge/License-MIT-22c55e">
-  <img alt="Release v2.1.0" src="https://img.shields.io/badge/Release-v2.1.0-a855f7">
+  <img alt="Release v2.1.1" src="https://img.shields.io/badge/Release-v2.1.1-a855f7">
 </p>
 
 ## What it does
@@ -33,13 +33,14 @@ Tested on a Lenovo LOQ with model identifier `83JC`. Other models may use differ
 ## Download and install
 
 1. Open the repository's [Releases](../../releases) page.
-2. Download `LenovoLOQBacklitEffects-Thrash.exe`.
-3. If the browser blocks the download, open its **Downloads** page (`Ctrl+J`), find the blocked EXE, and choose **Keep**, **Allow download**, or **Download unsafe file**. Confirm the warning only when the file came from this repository.
-4. Optionally download `Thrash-Code-Signing.cer` and `SHA256SUMS.txt`.
-5. Verify the SHA-256 checksum before running the application.
-6. Double-click the EXE and accept the administrator prompt.
+2. Download `LenovoLOQBacklitEffects-Thrash-Setup-v2.1.1.exe`.
+3. If the browser blocks the download, open its **Downloads** page (`Ctrl+J`), find the blocked installer, and choose **Keep**, **Allow download**, or **Download unsafe file**. Confirm the warning only when the file came from this repository.
+4. Download `SHA256SUMS.txt` and verify the installer's SHA-256 checksum.
+5. Run the installer, review the destination and shortcut options, and accept the administrator prompt.
 
-> Chrome and Edge may block uncommon self-signed applications automatically. The EXE must sometimes be allowed manually from the browser's Downloads page before it can be installed. This warning is expected for a self-signed release; always verify the checksum first.
+The compressed installer contains the application, public Thrash certificate, app checksum, README, license, Start-menu shortcut, optional desktop shortcut, and uninstaller. It does **not** silently trust the self-signed certificate; the public `.cer` is installed under the application's `Verification` folder for manual inspection.
+
+> Chrome and Edge may block uncommon self-signed applications automatically. The installer must sometimes be allowed manually from the browser's Downloads page. This warning is expected for a self-signed release; always verify the checksum first.
 
 The release is signed with a self-signed `CN=Thrash` certificate. A self-signed certificate is not automatically trusted on other computers. Import the included public `.cer` only if you trust this repository and the downloaded checksum matches the release notes. A publicly trusted publisher label requires a commercial CA-issued code-signing certificate.
 
@@ -110,6 +111,8 @@ dist\LenovoLOQBacklitEffects-Thrash.exe
 ```
 
 `build_exe.bat` performs the same steps interactively. Local builds are unsigned unless you provide your own code-signing certificate. Never commit a `.pfx`, `.p12`, private key, or certificate password.
+
+To build the compressed installer after creating the EXE, install Inno Setup 6 and run `build_installer.bat`. The output is written to `installer-dist`. Public certificates may be included; private signing keys must never be placed in the installer or repository.
 
 ## Troubleshooting
 

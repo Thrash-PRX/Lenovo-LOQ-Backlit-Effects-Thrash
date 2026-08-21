@@ -9,6 +9,8 @@ env/
 
 build/
 dist/
+installer-dist/
+installer-app/
 *.spec.bak
 
 .idea/

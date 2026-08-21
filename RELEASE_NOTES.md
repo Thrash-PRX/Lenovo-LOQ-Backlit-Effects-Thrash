@@ -1,4 +1,4 @@
-# Lenovo LOQ Backlit Effects - Thrash v2.1.0
+# Lenovo LOQ Backlit Effects - Thrash v2.1.1
 
 A sharper interface, beat-focused speaker lighting, and automatic battery saving.
 
@@ -11,12 +11,12 @@ A sharper interface, beat-focused speaker lighting, and automatic battery saving
 - Run at Windows Startup toggle using an elevated per-user scheduled task
 - Adaptive speaker beat detection based on transient onsets instead of raw volume alone
 - Microphone and speaker modes remain separate and clearly labeled
+- One compressed installer with shortcuts, verification files, and clean uninstall support
 
 ## Release assets
 
-- `LenovoLOQBacklitEffects-Thrash.exe` — signed standalone Windows application
-- `Thrash-Code-Signing.cer` — public self-signed certificate
-- `SHA256SUMS.txt` — release integrity checksums
+- `LenovoLOQBacklitEffects-Thrash-Setup-v2.1.1.exe` — signed compressed Windows installer
+- `SHA256SUMS.txt` — installer integrity checksum
 
 ## Important
 

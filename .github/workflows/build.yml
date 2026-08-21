@@ -34,9 +34,30 @@ jobs:
       - name: Build unsigned executable
         run: python -m PyInstaller --clean --noconfirm keyboard-effects.spec
 
-      - name: Upload unsigned build
+      - name: Build installer application folder
+        run: python -m PyInstaller --clean --noconfirm --distpath installer-app --workpath build/installer-app keyboard-effects-installer.spec
+
+      - name: Generate unsigned-build checksums
+        shell: pwsh
+        run: |
+          $exeHash = (Get-FileHash -Algorithm SHA256 installer-app/LenovoLOQBacklitEffects-Thrash/LenovoLOQBacklitEffects-Thrash.exe).Hash
+          $certHash = (Get-FileHash -Algorithm SHA256 installer/Thrash-Code-Signing.cer).Hash
+          @(
+            "$exeHash  LenovoLOQBacklitEffects-Thrash.exe"
+            "$certHash  Thrash-Code-Signing.cer"
+          ) | Set-Content -Encoding ascii installer/SHA256SUMS.txt
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Build unsigned compressed installer
+        run: '& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" installer.iss'
+
+      - name: Upload unsigned builds
         uses: actions/upload-artifact@v4
         with:
           name: LenovoLOQBacklitEffects-Thrash-unsigned
-          path: dist/LenovoLOQBacklitEffects-Thrash.exe
+          path: |
+            dist/LenovoLOQBacklitEffects-Thrash.exe
+            installer-dist/LenovoLOQBacklitEffects-Thrash-Setup-v2.1.1.exe
           if-no-files-found: error
