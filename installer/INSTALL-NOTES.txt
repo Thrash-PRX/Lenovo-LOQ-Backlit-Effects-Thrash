@@ -8,9 +8,14 @@ This installer contains:
 • README and MIT license
 • Start-menu and optional desktop shortcuts
 • A standard Windows uninstaller
+• Version 3.1.1 liquid-glass artwork and God Mode interface
 
 The included certificate is NOT silently added to a trusted certificate store.
 Trusting a self-signed publisher is a security decision that must remain under
 the user's control. Verify the installer checksum before continuing.
 
 Lenovo Vantage and administrator access are required for hardware control.
+
+If the browser blocks the download, open its Downloads page (Ctrl+J), find the
+blocked installer, and choose Keep or Allow only after confirming it came from
+the official repository and its SHA-256 checksum matches the release.

@@ -21,15 +21,19 @@ import queue
 import math
 import tempfile
 from xml.sax.saxutils import escape as xml_escape
-from PySide6.QtCore import Qt, QTimer, QRectF, QPointF, QEasingCurve, QPropertyAnimation
+from PySide6.QtCore import (
+    Qt, QTimer, QRectF, QPointF, QEasingCurve, QPropertyAnimation,
+    QSettings, QVariantAnimation,
+)
 from PySide6.QtGui import (
-    QAction, QColor, QFont, QIcon, QLinearGradient, QPainter,
+    QAction, QColor, QFont, QIcon, QLinearGradient, QPainter, QPixmap,
     QPen, QRadialGradient,
 )
 from PySide6.QtWidgets import (
     QAbstractButton, QApplication, QButtonGroup, QCheckBox, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox, QPushButton, QRadioButton,
-    QProgressBar, QSizePolicy, QSlider, QSystemTrayIcon, QVBoxLayout, QWidget,
+    QProgressBar, QScrollArea, QSizePolicy, QSlider, QStackedWidget,
+    QSystemTrayIcon, QVBoxLayout, QWidget,
 )
 
 # Define hook-related types and signatures for ctypes
@@ -92,7 +96,7 @@ def resource_path(relative_path):
     return os.path.join(base, relative_path)
 
 
-APP_VERSION = "2.1.1"
+APP_VERSION = "3.1.1"
 STARTUP_TASK_NAME = "Lenovo LOQ Backlit Effects - Thrash"
 STARTUP_RUN_VALUE = "Lenovo LOQ Backlit Effects - Thrash"
 STARTUP_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -285,6 +289,9 @@ class KeyboardBacklightController:
         self.method = None
         self.current_level = 2  # 0=off, 1=dim, 2=bright
         self.max_level = 2
+        self.backlight_level_type = "Unknown"
+        self.compatible_white_backlight = False
+        self.contract_version = "Unknown"
         self._lock = threading.Lock()
         self.ps_proc = None
         self._ps_output = queue.Queue()
@@ -302,10 +309,15 @@ class KeyboardBacklightController:
     def _get_system_model(self):
         try:
             import winreg
-            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\BIOS")
-            model = winreg.QueryValueEx(key, "SystemProductName")[0]
-            winreg.CloseKey(key)
-            return model.strip()
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\BIOS") as key:
+                product = str(winreg.QueryValueEx(key, "SystemProductName")[0]).strip()
+                try:
+                    family = str(winreg.QueryValueEx(key, "SystemFamily")[0]).strip()
+                except OSError:
+                    family = ""
+            if family and family.lower() not in ("to be filled by o.e.m.", "system product name"):
+                return f"{family} ({product})" if product and product not in family else family
+            return product
         except Exception:
             return "Lenovo Laptop"
 
@@ -322,6 +334,7 @@ class KeyboardBacklightController:
         dlls = find_lenovo_dlls()
         if dlls:
             try:
+                self.contract_version = os.path.basename(os.path.dirname(dlls["contract"]))
                 powershell = os.path.join(
                     os.environ.get("SystemRoot", r"C:\Windows"),
                     "System32", "WindowsPowerShell", "v1.0", "powershell.exe"
@@ -362,12 +375,37 @@ class KeyboardBacklightController:
                     $resp = $setBacklightMethod.Invoke($agent, @($jsonPayload, $null))
                     Write-Output "OK:$level"
                 }}
+
+                function Get-KbdBacklight {{
+                    $status = $agentType.GetMethod('GetBacklightStatus', [System.Reflection.BindingFlags]::Public -bor [System.Reflection.BindingFlags]::Instance).Invoke($agent, $null)
+                    $list = $status.GetType().GetProperty('List').GetValue($status)
+                    $items = $list.GetType().GetProperty('Items').GetValue($list)
+                    $level = 'Unknown'
+                    $capability = 'Unknown'
+                    foreach ($item in $items) {{
+                        $keyVal = $item.GetType().GetProperty('key').GetValue($item)
+                        $valueVal = $item.GetType().GetProperty('value').GetValue($item)
+                        if ($keyVal -eq 'KeyboardBacklightStatus') {{ $level = [string]$valueVal }}
+                        if ($keyVal -eq 'KeyboardBacklightLevel') {{ $capability = [string]$valueVal }}
+                    }}
+                    Write-Output "STATE:$level|$capability"
+                }}
                 """
                 self.ps_proc.stdin.write(init_script + "\n")
                 self.ps_proc.stdin.flush()
 
-                if not self._send_command("Level_2"):
-                    raise RuntimeError("Lenovo Vantage rejected the keyboard backlight command")
+                state = self._query_backlight_unlocked()
+                if state is None:
+                    raise RuntimeError("Lenovo Vantage did not report a keyboard backlight state")
+                level, capability = state
+                if capability not in ("OneLevel", "TwoLevels"):
+                    raise RuntimeError(
+                        f"This build currently supports white Lenovo backlights only (reported: {capability})"
+                    )
+                self.current_level = level
+                self.backlight_level_type = capability
+                self.max_level = 1 if capability == "OneLevel" else 2
+                self.compatible_white_backlight = True
                 self.method = "lenovo_vantage_dll"
                 return True
             except Exception as e:
@@ -378,7 +416,48 @@ class KeyboardBacklightController:
             self.last_error = "Lenovo Vantage keyboard DLLs were not found"
 
         self.method = "unavailable"
+        self.compatible_white_backlight = False
         return False
+
+    def _query_backlight_unlocked(self):
+        """Return (native level, capability) without changing the keyboard."""
+        if not self.ps_proc or self.ps_proc.poll() is not None:
+            return None
+        while True:
+            try:
+                self._ps_output.get_nowait()
+            except queue.Empty:
+                break
+        try:
+            self.ps_proc.stdin.write("Get-KbdBacklight\n")
+            self.ps_proc.stdin.flush()
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                try:
+                    response = self._ps_output.get(timeout=max(0.01, deadline - time.monotonic()))
+                except queue.Empty:
+                    break
+                if response.startswith("STATE:"):
+                    payload = response[6:]
+                    state_text, _, capability = payload.partition("|")
+                    level_map = {"Off": 0, "DisabledOff": 0, "Level_1": 1, "Level_2": 2, "Auto": 1}
+                    if state_text in level_map:
+                        return level_map[state_text], capability or "Unknown"
+            return None
+        except Exception as exc:
+            self.last_error = str(exc)
+            return None
+
+    def refresh_native_brightness(self):
+        """Poll Fn+Space/Vantage state without mutating it."""
+        with self._lock:
+            state = self._query_backlight_unlocked()
+            if state is None:
+                return None
+            level, capability = state
+            self.current_level = level
+            self.backlight_level_type = capability
+            return level
 
     def _send_command(self, level_str):
         """Send command to persistent PowerShell stdin."""
@@ -487,6 +566,9 @@ class KeyboardBacklightController:
             "method_display": names.get(self.method, self.method),
             "current_level": self.current_level,
             "max_level": self.max_level,
+            "backlight_level_type": self.backlight_level_type,
+            "compatible_white_backlight": self.compatible_white_backlight,
+            "contract_version": self.contract_version,
             "is_admin": self._admin,
             "system_model": self.system_model,
             "last_error": self.last_error,
@@ -499,30 +581,43 @@ class KeyboardBacklightController:
 
 class EffectEngine:
     EFFECTS_META = [
-        {"id": "default",   "name": "Default Backlight", "icon": "◉",  "desc": "Normal light with 10-second idle sleep"},
-        {"id": "blink",     "name": "Blink",          "icon": "●",     "desc": "Classic on-and-off blinking"},
-        {"id": "breathe",   "name": "Breathe",        "icon": "◌",     "desc": "Smooth fade in and out"},
-        {"id": "strobe",    "name": "Strobe",         "icon": "ϟ",     "desc": "Rapid strobe flashing"},
+        {"id": "battery_saver", "name": "Battery Saver", "icon": "◉",  "desc": "Wakes softly, sleeps after 30 seconds"},
+        {"id": "breathe",   "name": "Breathe",        "icon": "◌",     "desc": "Fluid sine-curve breathing"},
         {"id": "heartbeat", "name": "Heartbeat",      "icon": "♥",     "desc": "Double-pulse heartbeat rhythm"},
-        {"id": "sos",       "name": "SOS",            "icon": "···",   "desc": "Morse code emergency signal"},
         {"id": "disco",     "name": "Disco",          "icon": "✦",     "desc": "Random high-energy flashing"},
-        {"id": "lightning", "name": "Lightning",      "icon": "↯",     "desc": "Random lightning strikes"},
         {"id": "pulse",     "name": "Pulse",          "icon": "◍",     "desc": "Quick flash with a slow fade"},
-        {"id": "candle",    "name": "Candle",         "icon": "♨",     "desc": "Warm flickering rhythm"},
         {"id": "binary",    "name": "Binary Clock",   "icon": "01",    "desc": "Encodes seconds in binary"},
         {"id": "wave",      "name": "Wave",           "icon": "≈",     "desc": "Rolling brightness crest"},
-        {"id": "reactive",  "name": "Reactive",       "icon": "⌨",     "desc": "Responds instantly to typing"},
+        {"id": "reactive",  "name": "Reactive",       "icon": "⌨",     "desc": "Brightens on every keypress"},
         {"id": "music_mic", "name": "Music / Mic",    "icon": "♪",     "desc": "Follows the default microphone"},
         {"id": "music_speaker", "name": "Music / Speaker", "icon": "♫", "desc": "Beat detection from speaker output"},
     ]
+
+    RECOMMENDED_SPEEDS = {
+        "battery_saver": 1.0,
+        "breathe": 1.0,
+        "heartbeat": 1.0,
+        "disco": 0.72,
+        "pulse": 1.0,
+        "binary": 1.0,
+        "wave": 0.9,
+        "reactive": 1.0,
+        "music_mic": 1.15,
+        "music_speaker": 1.35,
+    }
 
     def __init__(self, ctrl):
         self.ctrl = ctrl
         self.running = False
         self.current_effect = None
         self.speed = 1.0
-        self.mode = 1
-        self.hold_behavior = 1 # 1 = Constant blink, 2 = Stay active until held key released
+        self.intensity = 50
+        self.mode = 2
+        self.hold_behavior = 2
+        self.idle_timeout = 30.0
+        self.start_asleep = False
+        self._rendered_intensity = 0.0
+        self._pdm_error = 0.0
         self._stop = threading.Event()
         self._thread = None
 
@@ -549,20 +644,24 @@ class EffectEngine:
         self._speaker_glow_until = 0.0
         self._idle_started = time.monotonic()
         self._default_level = None
+        self._last_key_vk = None
         self.idle_sleeping = False
         self.idle_seconds = 0.0
         self.music_level = 0.0
         self.last_error = None
 
-    def start(self, effect, speed=1.0, mode=1, hold_behavior=1):
+    def start(self, effect, intensity=50, speed=None, mode=2, hold_behavior=2, start_asleep=False):
         valid_effects = {item["id"] for item in self.EFFECTS_META}
         if effect not in valid_effects:
             raise ValueError(f"Unknown effect: {effect}")
-        self.stop()
+        self.stop(restore=False)
         self.current_effect = effect
-        self.speed = max(0.1, min(speed, 5.0))
+        recommended = self.RECOMMENDED_SPEEDS.get(effect, 1.0)
+        self.speed = max(0.1, min(recommended if speed is None else speed, 5.0))
+        self.intensity = max(1, min(int(intensity), 100))
         self.mode = mode
         self.hold_behavior = hold_behavior
+        self.start_asleep = bool(start_asleep)
         self.last_error = None
         self._music_floor = 0.01
         self._music_peak = 0.05
@@ -574,8 +673,10 @@ class EffectEngine:
         self._speaker_glow_until = 0.0
         self._idle_started = time.monotonic()
         self._default_level = None
-        self.idle_sleeping = False
+        self.idle_sleeping = self.start_asleep
         self.idle_seconds = 0.0
+        self._rendered_intensity = 0.0
+        self._pdm_error = 0.0
         self.music_level = 0.0
         with self._keys_lock:
             self._pressed_keys.clear()
@@ -583,13 +684,13 @@ class EffectEngine:
         self._stop.clear()
 
         # Reactive and battery-saving default modes both need global input.
-        if self.current_effect in ("reactive", "default"):
+        if self.current_effect in ("reactive", "battery_saver"):
             self._start_keyboard_hook()
 
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
-    def stop(self):
+    def stop(self, restore=True):
         self.running = False
         self._stop.set()
 
@@ -598,7 +699,9 @@ class EffectEngine:
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2)
         self._close_music_stream()
-        self.ctrl.set_backlight(True)
+        if restore:
+            target = max(1, int(round((self.intensity / 100.0) * self.ctrl.max_level)))
+            self.ctrl.set_brightness(min(self.ctrl.max_level, target))
         self.current_effect = None
 
     def _wait(self, secs):
@@ -607,12 +710,12 @@ class EffectEngine:
 
     def _loop(self):
         fns = {
-            "default": self._default_backlight,
-            "blink": self._blink, "breathe": self._breathe,
-            "strobe": self._strobe, "heartbeat": self._heartbeat,
-            "sos": self._sos, "disco": self._disco,
-            "lightning": self._lightning, "pulse": self._pulse,
-            "candle": self._candle, "binary": self._binary,
+            "battery_saver": self._battery_saver,
+            "breathe": self._breathe,
+            "heartbeat": self._heartbeat,
+            "disco": self._disco,
+            "pulse": self._pulse,
+            "binary": self._binary,
             "wave": self._wave, "reactive": self._reactive,
             "music_mic": self._music_mic,
             "music_speaker": self._music_speaker,
@@ -630,7 +733,9 @@ class EffectEngine:
         finally:
             self._close_music_stream()
             self.running = False
-            self.ctrl.set_backlight(True)
+            if not self._stop.is_set():
+                target = max(1, int(round((self.intensity / 100.0) * self.ctrl.max_level)))
+                self.ctrl.set_brightness(min(self.ctrl.max_level, target))
 
     # -- Keyboard Hook Management -------------------------------------------
 
@@ -659,6 +764,7 @@ class EffectEngine:
                     vk = kbd.vkCode
 
                     if wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
+                        self._last_key_vk = vk
                         with self._keys_lock:
                             is_repeat = vk in self._pressed_keys
                             if not is_repeat:
@@ -700,120 +806,133 @@ class EffectEngine:
 
     # -- Effects ------------------------------------------------------------
 
-    def _default_backlight(self):
-        """Keep normal backlight on, sleep after 10 idle seconds, wake on input."""
+    def _render_intensity(self, percent):
+        """Render a perceived 0-100 intensity across the three native levels."""
+        percent = max(0.0, min(100.0, float(percent)))
+        self._rendered_intensity = percent
+        maximum = max(1, int(getattr(self.ctrl, "max_level", 2)))
+        target = (percent / 100.0) * maximum
+        base = min(maximum, int(math.floor(target)))
+        fraction = max(0.0, target - base)
+        level = base
+        if base < maximum and fraction > 0:
+            self._pdm_error += fraction
+            if self._pdm_error >= 1.0:
+                level = base + 1
+                self._pdm_error -= 1.0
+        if level != self.ctrl.current_level:
+            self.ctrl.set_brightness(level)
+        return level
+
+    def _fade_to(self, target, duration=0.55, start=None):
+        """Perceptually smooth transition using sine easing and pulse-density blending."""
+        start = self._rendered_intensity if start is None else float(start)
+        target = max(0.0, min(100.0, float(target)))
+        started = time.monotonic()
+        duration = max(0.05, float(duration))
+        while self.running:
+            progress = min(1.0, (time.monotonic() - started) / duration)
+            eased = 0.5 - 0.5 * math.cos(math.pi * progress)
+            self._render_intensity(start + (target - start) * eased)
+            if progress >= 1.0:
+                return False
+            if self._wait(1.0 / 60.0):
+                return True
+        return True
+
+    def _battery_saver(self):
+        """Wake softly to remembered intensity and sleep after 30 idle seconds."""
         if self._keypress_event.is_set():
             self._keypress_event.clear()
+            if self._last_key_vk == 0x20 and not self.idle_sleeping:
+                # Fn itself is firmware-owned, but Space is visible. Give the
+                # native Fn+Space cycle time to settle, then synchronize.
+                previous_native = self.ctrl.current_level
+                if self._wait(0.07):
+                    return True
+                native = self.ctrl.refresh_native_brightness()
+                if native is not None and native != previous_native:
+                    self.intensity = max(1, int(round((native / self.ctrl.max_level) * 100)))
             self._idle_started = time.monotonic()
             self.idle_seconds = 0.0
             if self.idle_sleeping:
                 self.idle_sleeping = False
+                if self._fade_to(self.intensity, 0.68, start=0):
+                    return True
 
         self.idle_seconds = max(0.0, time.monotonic() - self._idle_started)
-        if self.idle_seconds >= 10.0 and not self.idle_sleeping:
+        if self.idle_seconds >= self.idle_timeout and not self.idle_sleeping:
             self.idle_sleeping = True
-        desired_level = 0 if self.idle_sleeping else 2
-        if desired_level != self._default_level:
-            self.ctrl.set_brightness(desired_level)
-            self._default_level = desired_level
-        return self._wait(0.1)
+            if self._fade_to(0, 0.48):
+                return True
 
-    def _blink(self):
-        d = 0.5 / self.speed
-        self.ctrl.set_backlight(True)
-        if self._wait(d): return True
-        self.ctrl.set_backlight(False)
-        if self._wait(d): return True
+        if self.idle_sleeping:
+            if self.ctrl.current_level != 0:
+                self.ctrl.set_brightness(0)
+            return self._wait(0.05)
+
+        self._render_intensity(self.intensity)
+        return self._wait(1.0 / 60.0)
 
     def _breathe(self):
-        d = 0.35 / self.speed
-        self.ctrl.set_brightness(0)
-        if self._wait(d): return True
-        self.ctrl.set_brightness(1)
-        if self._wait(d): return True
-        self.ctrl.set_brightness(2)
-        if self._wait(d * 1.5): return True
-        self.ctrl.set_brightness(1)
-        if self._wait(d): return True
-
-    def _strobe(self):
-        d = 0.08 / self.speed
-        self.ctrl.set_backlight(True)
-        if self._wait(d): return True
-        self.ctrl.set_backlight(False)
-        if self._wait(d): return True
+        """Continuous sine breathing rendered at 60 Hz over native levels."""
+        cycle = 4.2 / self.speed
+        started = time.monotonic()
+        while self.running:
+            phase = ((time.monotonic() - started) % cycle) / cycle
+            envelope = 0.5 - 0.5 * math.cos(phase * math.tau)
+            # A small gamma lift avoids spending too long visually black.
+            envelope = envelope ** 0.72
+            self._render_intensity(self.intensity * envelope)
+            if self._wait(1.0 / 60.0):
+                return True
+        return True
 
     def _heartbeat(self):
         b, p, r = 0.12 / self.speed, 0.15 / self.speed, 0.7 / self.speed
-        self.ctrl.set_brightness(2)
+        self._render_intensity(self.intensity)
         if self._wait(b): return True
-        self.ctrl.set_brightness(0)
+        self._render_intensity(0)
         if self._wait(p): return True
-        self.ctrl.set_brightness(2)
+        self._render_intensity(self.intensity)
         if self._wait(b): return True
-        self.ctrl.set_brightness(0)
+        self._render_intensity(0)
         if self._wait(r): return True
 
-    def _sos(self):
-        dot, dash = 0.15 / self.speed, 0.45 / self.speed
-        gap, lgap, wgap = 0.15 / self.speed, 0.45 / self.speed, 1.0 / self.speed
-        def send(durs):
-            for d in durs:
-                self.ctrl.set_backlight(True)
-                if self._wait(d): return True
-                self.ctrl.set_backlight(False)
-                if self._wait(gap): return True
-            return False
-        if send([dot]*3): return True
-        if self._wait(lgap): return True
-        if send([dash]*3): return True
-        if self._wait(lgap): return True
-        if send([dot]*3): return True
-        if self._wait(wgap): return True
-
     def _disco(self):
-        self.ctrl.set_backlight(True)
+        self._render_intensity(self.intensity)
         if self._wait(random.uniform(0.04, 0.25) / self.speed): return True
-        self.ctrl.set_backlight(False)
+        self._render_intensity(0)
         if self._wait(random.uniform(0.04, 0.25) / self.speed): return True
-
-    def _lightning(self):
-        self.ctrl.set_backlight(False)
-        if self._wait(random.uniform(0.4, 1.8) / self.speed): return True
-        for _ in range(random.randint(1, 3)):
-            self.ctrl.set_backlight(True)
-            if self._wait(random.uniform(0.03, 0.1) / self.speed): return True
-            self.ctrl.set_backlight(False)
-            if self._wait(random.uniform(0.04, 0.12) / self.speed): return True
 
     def _pulse(self):
-        self.ctrl.set_brightness(2)
-        if self._wait(0.1 / self.speed): return True
-        self.ctrl.set_brightness(1)
-        if self._wait(0.15 / self.speed): return True
-        self.ctrl.set_brightness(0)
-        if self._wait(0.5 / self.speed): return True
-
-    def _candle(self):
-        self.ctrl.set_backlight(random.random() < 0.75)
-        if self._wait(random.uniform(0.05, 0.2) / self.speed): return True
+        if self._fade_to(self.intensity, 0.10 / self.speed, start=0): return True
+        if self._fade_to(0, 0.72 / self.speed, start=self.intensity): return True
+        if self._wait(0.18 / self.speed): return True
 
     def _binary(self):
         bits = format(datetime.datetime.now().second, "06b")
         for b in bits:
             if not self.running: return True
-            self.ctrl.set_backlight(b == "1")
+            self._render_intensity(self.intensity if b == "1" else 0)
             if self._wait(0.35 / self.speed): return True
-        self.ctrl.set_backlight(False)
+        self._render_intensity(0)
         if self._wait(0.6 / self.speed): return True
 
     def _wave(self):
-        """A rolling crest for single-zone keyboards: off -> dim -> bright -> dim."""
-        step = 0.14 / self.speed
-        for level, duration in [(0, step), (1, step), (2, step * 1.25), (1, step), (0, step * 1.8)]:
-            self.ctrl.set_brightness(level)
-            if self._wait(duration):
+        """A quicker asymmetric rolling crest for a single-zone keyboard."""
+        cycle = 2.8 / self.speed
+        started = time.monotonic()
+        while self.running:
+            phase = ((time.monotonic() - started) % cycle) / cycle
+            if phase < 0.32:
+                envelope = math.sin((phase / 0.32) * math.pi / 2) ** 1.4
+            else:
+                envelope = max(0.0, math.cos(((phase - 0.32) / 0.68) * math.pi / 2)) ** 2.2
+            self._render_intensity(self.intensity * envelope)
+            if self._wait(1.0 / 60.0):
                 return True
+        return True
 
     def _music_mic(self):
         """Map default-microphone loudness to the keyboard's three brightness levels."""
@@ -897,17 +1016,17 @@ class EffectEngine:
             self._speaker_glow_until = now + 0.19
 
         if now < self._speaker_flash_until:
-            level = 2
+            output_intensity = self.intensity
             target_meter = 1.0
         elif now < self._speaker_glow_until:
-            level = 1
+            output_intensity = self.intensity * 0.48
             target_meter = 0.48
         else:
-            level = 0
+            output_intensity = 0
             target_meter = min(0.28, raw_level * 1.8)
 
         self.music_level = self.music_level * 0.34 + target_meter * 0.66
-        self.ctrl.set_brightness(level)
+        self._render_intensity(output_intensity)
         return is_beat
 
     def _apply_music_intensity(self, raw_level):
@@ -924,13 +1043,7 @@ class EffectEngine:
         intensity = max(0.0, min(1.0, ((raw_level - self._music_floor) / span) * sensitivity))
         self.music_level = self.music_level * 0.45 + intensity * 0.55
 
-        if self.music_level >= 0.68:
-            level = 2
-        elif self.music_level >= 0.24:
-            level = 1
-        else:
-            level = 0
-        self.ctrl.set_brightness(level)
+        self._render_intensity(self.intensity * self.music_level)
 
     def _close_music_stream(self):
         stream = self._music_stream
@@ -953,32 +1066,29 @@ class EffectEngine:
         self.music_level = 0.0
 
     def _reactive(self):
-        """Keyboard lights react to keypresses based on the selected mode."""
+        """Recommended default: dim idle, bright press, smooth release."""
         m = str(self.mode)
         if m == "2":
-            base, active = 1, 2
+            base, active = self.intensity * 0.36, self.intensity
         elif m == "3":
-            base, active = 2, 1
+            base, active = self.intensity, self.intensity * 0.40
         elif m == "4":
-            base, active = 0, 1
+            base, active = 0, self.intensity * 0.55
         elif m == "5":
-            base, active = 0, 2
-        else: # Default/Mode 1
-            base, active = 2, 0
+            base, active = 0, self.intensity
+        else:
+            base, active = self.intensity, 0
 
-        self.ctrl.set_brightness(base)
+        self._render_intensity(base)
         self._keypress_event.clear()
         self._keyrelease_event.clear()
 
-        # Block until a key is pressed (with a timeout so we check running state periodically)
         if self._keypress_event.wait(timeout=0.2):
-            # Reaction
-            self.ctrl.set_brightness(active)
+            self._render_intensity(active)
 
             if str(self.hold_behavior) == "2":
-                # Solid Hold: Stay active as long as any keys are pressed
-                min_dur = 0.10 / self.speed
-                self._wait(min_dur)
+                if self._wait(0.075 / self.speed):
+                    return True
 
                 with self._keys_lock:
                     keys_held = len(self._pressed_keys) > 0
@@ -988,23 +1098,24 @@ class EffectEngine:
                     with self._keys_lock:
                         keys_held = len(self._pressed_keys) > 0
 
-                self.ctrl.set_brightness(base)
                 self._keypress_event.clear()
                 self._keyrelease_event.clear()
-                self._wait(0.04)
+                if self._fade_to(base, 0.26 / self.speed, start=active):
+                    return True
             else:
-                # Constant Blinking
-                dur = 0.12 / self.speed
-                self._wait(dur)
-                self.ctrl.set_brightness(base)
+                if self._wait(0.11 / self.speed):
+                    return True
                 self._keypress_event.clear()
-                self._wait(0.04)
+                if self._fade_to(base, 0.22 / self.speed, start=active):
+                    return True
 
     def get_status(self):
         return {
             "running": self.running,
             "current_effect": self.current_effect,
             "speed": self.speed,
+            "intensity": self.intensity,
+            "idle_timeout": self.idle_timeout,
             "music_level": self.music_level,
             "idle_sleeping": self.idle_sleeping,
             "idle_seconds": self.idle_seconds,
@@ -1037,15 +1148,16 @@ class EffectCard(QAbstractButton):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         rect = QRectF(self.rect()).adjusted(0.75, 0.75, -0.75, -0.75)
+        god_mode = bool(getattr(self.window(), "god_mode", False))
 
         if self.isChecked():
             background = QLinearGradient(rect.topLeft(), rect.bottomRight())
-            background.setColorAt(0.0, QColor("#123a51"))
-            background.setColorAt(1.0, QColor("#0b2638"))
-            border = QColor("#55c9ff")
+            background.setColorAt(0.0, QColor("#4b1018") if god_mode else QColor("#123a51"))
+            background.setColorAt(1.0, QColor("#21090e") if god_mode else QColor("#0b2638"))
+            border = QColor("#ff4d5f") if god_mode else QColor("#55c9ff")
             name_color = QColor("#f5fbff")
-            desc_color = QColor("#a9daf2")
-            icon_color = QColor("#67d3ff")
+            desc_color = QColor("#ffc0c7") if god_mode else QColor("#a9daf2")
+            icon_color = QColor("#ff6575") if god_mode else QColor("#67d3ff")
         elif self.underMouse():
             background = QColor(23, 36, 53, 248)
             border = QColor(62, 115, 153)
@@ -1086,6 +1198,7 @@ class AmbientBackground(QWidget):
     def __init__(self):
         super().__init__()
         self.setObjectName("central")
+        self._texture = QPixmap(resource_path(os.path.join("assets", "thrash-liquid-glass-v3.png")))
         self._started = time.monotonic()
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.update)
@@ -1102,6 +1215,16 @@ class AmbientBackground(QWidget):
         base.setColorAt(0.52, QColor("#0a101b"))
         base.setColorAt(1.0, QColor("#070a11"))
         painter.fillRect(self.rect(), base)
+
+        if not self._texture.isNull():
+            scaled = self._texture.scaled(
+                self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
+            )
+            source_x = max(0, (scaled.width() - width) // 2)
+            source_y = max(0, (scaled.height() - height) // 2)
+            painter.setOpacity(0.42)
+            painter.drawPixmap(0, 0, scaled, source_x, source_y, width, height)
+            painter.setOpacity(1.0)
 
         for x, y, radius, color in [
             (width * (0.17 + 0.025 * math.sin(phase * 0.45)), height * 0.10,
@@ -1621,6 +1744,703 @@ class DesktopApplication(QMainWindow):
         self._quit_application()
         event.accept()
 
+
+class GodModeOverlay(QWidget):
+    """Short, original red unlock sequence for the advanced-control reveal."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.progress = 0.0
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.hide()
+
+    def play(self, finished):
+        self.setGeometry(self.parentWidget().rect())
+        self.raise_()
+        self.show()
+        self.animation = QVariantAnimation(self)
+        self.animation.setDuration(1150)
+        self.animation.setStartValue(0.0)
+        self.animation.setEndValue(1.0)
+        self.animation.setEasingCurve(QEasingCurve.InOutCubic)
+        self.animation.valueChanged.connect(self._tick)
+        self.animation.finished.connect(lambda: (self.hide(), finished()))
+        self.animation.start()
+
+    def _tick(self, value):
+        self.progress = float(value)
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        pulse = math.sin(self.progress * math.pi)
+        painter.fillRect(self.rect(), QColor(3, 2, 4, int(242 * pulse)))
+        scan_x = int(self.width() * self.progress)
+        glow = QLinearGradient(scan_x - 130, 0, scan_x + 35, 0)
+        glow.setColorAt(0, QColor(255, 30, 55, 0))
+        glow.setColorAt(0.72, QColor(255, 30, 55, int(90 * pulse)))
+        glow.setColorAt(1, QColor(255, 87, 105, int(225 * pulse)))
+        painter.fillRect(QRectF(scan_x - 130, 0, 165, self.height()), glow)
+        painter.setPen(QPen(QColor(255, 64, 82, int(230 * pulse)), 2))
+        painter.drawLine(scan_x, 0, scan_x, self.height())
+        painter.setFont(QFont("Bahnschrift SemiCondensed", 10, QFont.DemiBold))
+        painter.setPen(QColor(255, 100, 113, int(255 * pulse)))
+        painter.drawText(QRectF(0, self.height() / 2 - 42, self.width(), 25),
+                         Qt.AlignCenter, "ADVANCED LIGHTING CORE")
+        painter.setFont(QFont("Bahnschrift SemiCondensed", 29, QFont.Bold))
+        painter.setPen(QColor(255, 244, 246, int(255 * pulse)))
+        message = "GOD MODE // ACTIVE" if self.progress > 0.62 else "UNLOCKING GOD MODE"
+        painter.drawText(QRectF(0, self.height() / 2 - 15, self.width(), 62),
+                         Qt.AlignCenter, message)
+        painter.end()
+
+
+# v3 replaces the original single-page shell above. Keeping the earlier class in
+# this source preserves an easy migration reference while this definition is the
+# one instantiated by the entry point.
+class DesktopApplication(QMainWindow):
+    """Legion-inspired, original desktop shell with progressive disclosure."""
+
+    LIGHTING_IDS = {
+        "battery_saver", "breathe", "heartbeat", "disco", "pulse",
+        "binary", "wave", "reactive",
+    }
+    AUDIO_IDS = {"music_mic", "music_speaker"}
+
+    def __init__(self, ctrl, effect_engine):
+        super().__init__()
+        self.ctrl = ctrl
+        self.engine = effect_engine
+        self.settings = QSettings("Thrash", "Lenovo LOQ Backlit Effects")
+        self.god_mode = self.settings.value("godMode", False, type=bool)
+        self.close_to_tray = self.settings.value("closeToTray", True, type=bool)
+        self.animations_enabled = self.settings.value("animations", True, type=bool)
+        self.intensity = max(1, min(self.settings.value("intensity", 50, type=int), 100))
+        self.engine.idle_timeout = max(10, min(self.settings.value("idleTimeout", 30, type=int), 300))
+        self.light_on = False
+        self._shown_error = None
+        self._quitting = False
+        self._tray_notice_shown = False
+        self._has_animated = False
+        self.effect_buttons = QButtonGroup(self)
+        self.nav_buttons = QButtonGroup(self)
+        self.react_buttons = QButtonGroup(self)
+        self.hold_buttons = QButtonGroup(self)
+        self.advanced_widgets = []
+        self.cards = {}
+        self._build_ui()
+        self._build_tray()
+        self._apply_god_mode(repaint=True)
+        self._select_effect("battery_saver")
+        self.status_timer = QTimer(self)
+        self.status_timer.timeout.connect(self._refresh_status)
+        self.status_timer.start(250)
+        self._refresh_status()
+
+    def _build_ui(self):
+        self.setWindowTitle("Lenovo LOQ Backlit Effects - Thrash")
+        self.setWindowIcon(QIcon(resource_path(os.path.join("assets", "app-icon.png"))))
+        self.resize(1280, 820)
+        self.setMinimumSize(1040, 700)
+        self._set_theme()
+        central = AmbientBackground()
+        self.setCentralWidget(central)
+        root = QHBoxLayout(central)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(14)
+        root.addWidget(self._make_sidebar())
+
+        body = QVBoxLayout()
+        body.setSpacing(12)
+        body.addWidget(self._make_header())
+        self.pages = QStackedWidget()
+        self.pages.addWidget(self._scroll_page(self._lighting_page()))
+        self.pages.addWidget(self._scroll_page(self._audio_page()))
+        self.pages.addWidget(self._scroll_page(self._device_page()))
+        self.pages.addWidget(self._scroll_page(self._settings_page()))
+        self.pages.addWidget(self._scroll_page(self._about_page()))
+        body.addWidget(self.pages, 1)
+        body.addWidget(self._make_action_bar())
+        root.addLayout(body, 1)
+        self.god_overlay = GodModeOverlay(central)
+
+    def _set_theme(self):
+        accent = "#ff4055" if self.god_mode else "#42c8ff"
+        accent_soft = "#451019" if self.god_mode else "#103c52"
+        self.setStyleSheet(f"""
+            QMainWindow {{ background: #05070c; }}
+            QWidget {{ color: #eaf1f7; font: 9.5pt 'Segoe UI Variable Text'; }}
+            QLabel {{ background: transparent; }}
+            QLabel#title {{ font: 700 25pt 'Bahnschrift SemiCondensed'; color: #fbfdff; }}
+            QLabel#pageTitle {{ font: 650 20pt 'Bahnschrift SemiCondensed'; color: #f7fbff; }}
+            QLabel#section {{ color: {accent}; font: 650 8pt 'Bahnschrift SemiCondensed'; }}
+            QLabel#muted {{ color: #8fa2b5; }}
+            QLabel#brand {{ color: #ffffff; font: 700 13pt 'Bahnschrift SemiCondensed'; }}
+            QLabel#brandSlash {{ color: {accent}; font: 900 18pt 'Bahnschrift SemiCondensed'; }}
+            QFrame#sidebar, QFrame#glass, QGroupBox {{ background: rgba(8, 14, 24, 224);
+                border: 1px solid rgba(113, 151, 184, 62); border-radius: 18px; }}
+            QFrame#sidebar {{ background: rgba(4, 8, 14, 239); }}
+            QFrame#status {{ background: rgba(8, 15, 25, 214); border: 1px solid rgba(95, 142, 174, 65); border-radius: 13px; }}
+            QPushButton {{ background: rgba(24, 35, 50, 238); border: 1px solid rgba(105, 141, 175, 55);
+                border-radius: 11px; padding: 10px 15px; font: 600 9pt 'Segoe UI Variable Text'; }}
+            QPushButton:hover {{ border-color: {accent}; background: rgba(34, 49, 68, 245); }}
+            QPushButton#nav {{ text-align: left; background: transparent; border: 0; padding: 13px 15px; color: #8fa2b6; }}
+            QPushButton#nav:checked {{ color: #ffffff; background: {accent_soft}; border-left: 3px solid {accent}; }}
+            QPushButton#primary {{ background: {accent}; color: #05080d; border: 0; font-weight: 750; }}
+            QPushButton#primary[running='true'] {{ background: #ff5367; color: #160407; }}
+            QCheckBox {{ spacing: 10px; padding: 6px; color: #c7d3de; }}
+            QCheckBox::indicator {{ width: 18px; height: 18px; border: 1px solid #536b82; border-radius: 6px; background: #0a121e; }}
+            QCheckBox::indicator:checked {{ background: {accent}; border-color: {accent}; }}
+            QRadioButton {{ padding: 6px; color: #c8d5df; }}
+            QGroupBox {{ margin-top: 12px; padding: 16px 12px 12px; }}
+            QGroupBox::title {{ subcontrol-origin: margin; left: 14px; color: {accent}; padding: 0 6px; }}
+            QSlider::groove:horizontal {{ height: 6px; background: #233248; border-radius: 3px; }}
+            QSlider::sub-page:horizontal {{ background: {accent}; border-radius: 3px; }}
+            QSlider::handle:horizontal {{ width: 19px; margin: -7px 0; background: #eaf8ff; border: 2px solid {accent}; border-radius: 9px; }}
+            QProgressBar {{ height: 8px; background: #1e2a3c; border: 0; border-radius: 4px; }}
+            QProgressBar::chunk {{ background: {accent}; border-radius: 4px; }}
+            QScrollArea {{ border: 0; background: transparent; }}
+            QScrollArea > QWidget > QWidget {{ background: transparent; }}
+        """)
+
+    def _make_sidebar(self):
+        sidebar = QFrame()
+        sidebar.setObjectName("sidebar")
+        sidebar.setFixedWidth(206)
+        layout = QVBoxLayout(sidebar)
+        layout.setContentsMargins(14, 20, 14, 18)
+        logo = QHBoxLayout()
+        slash = QLabel("T//")
+        slash.setObjectName("brandSlash")
+        word = QLabel("THRASH")
+        word.setObjectName("brand")
+        logo.addWidget(slash)
+        logo.addWidget(word)
+        logo.addStretch()
+        layout.addLayout(logo)
+        edition = QLabel("LOQ LIGHTING LAB")
+        edition.setObjectName("muted")
+        layout.addWidget(edition)
+        layout.addSpacing(24)
+        for index, (icon, text) in enumerate([
+            ("◈", "Lighting"), ("♫", "Audio Reactive"), ("▣", "Device"),
+            ("⚙", "Settings"), ("ⓘ", "About"),
+        ]):
+            button = QPushButton(f"{icon}    {text}")
+            button.setObjectName("nav")
+            button.setCheckable(True)
+            button.clicked.connect(lambda checked=False, i=index: self.pages.setCurrentIndex(i))
+            self.nav_buttons.addButton(button, index)
+            layout.addWidget(button)
+            if index == 0:
+                button.setChecked(True)
+        layout.addStretch()
+        self.god_badge = QLabel("GOD MODE  //  ARMED")
+        self.god_badge.setAlignment(Qt.AlignCenter)
+        self.god_badge.setStyleSheet("color:#ff6879; border:1px solid #8f2633; border-radius:10px; padding:8px; font-weight:700;")
+        layout.addWidget(self.god_badge)
+        return sidebar
+
+    def _make_header(self):
+        panel = QFrame()
+        panel.setObjectName("status")
+        row = QHBoxLayout(panel)
+        row.setContentsMargins(18, 13, 18, 13)
+        titles = QVBoxLayout()
+        title = QLabel("LENOVO LOQ BACKLIT EFFECTS")
+        title.setObjectName("title")
+        subtitle = QLabel("Native white-backlight control  •  private and local")
+        subtitle.setObjectName("muted")
+        titles.addWidget(title)
+        titles.addWidget(subtitle)
+        self.connection_dot = QLabel("●")
+        self.connection_dot.setStyleSheet("color:#2dd4bf; font-size:15px;")
+        self.method_label = QLabel("Detecting Lenovo lighting bridge…")
+        self.state_label = QLabel("READY")
+        self.state_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        row.addLayout(titles, 1)
+        row.addWidget(self.connection_dot)
+        row.addWidget(self.method_label)
+        row.addSpacing(16)
+        row.addWidget(self.state_label)
+        return panel
+
+    def _scroll_page(self, content):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(content)
+        return scroll
+
+    def _page(self, title, subtitle):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(12)
+        heading = QLabel(title)
+        heading.setObjectName("pageTitle")
+        note = QLabel(subtitle)
+        note.setObjectName("muted")
+        layout.addWidget(heading)
+        layout.addWidget(note)
+        return page, layout
+
+    def _card_grid(self, ids, columns=3):
+        host = QWidget()
+        grid = QGridLayout(host)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(10)
+        effects = [item for item in EffectEngine.EFFECTS_META if item["id"] in ids]
+        for index, effect in enumerate(effects):
+            card = EffectCard(effect)
+            card.setProperty("effect_id", effect["id"])
+            self.effect_buttons.addButton(card)
+            self.cards[effect["id"]] = card
+            card.clicked.connect(self._effect_changed)
+            grid.addWidget(card, index // columns, index % columns)
+        return host
+
+    def _lighting_page(self):
+        page, layout = self._page("LIGHTING", "Curated effects with hardware-safe automatic timing.")
+        layout.addWidget(self._card_grid(self.LIGHTING_IDS, 3))
+        self.battery_note = QLabel("BATTERY SAVER  •  softly wakes to your chosen intensity  •  sleeps after 30 seconds")
+        self.battery_note.setObjectName("muted")
+        layout.addWidget(self.battery_note)
+        self.advanced_panel = QGroupBox("GOD MODE  /  ADVANCED TIMING")
+        advanced = QVBoxLayout(self.advanced_panel)
+        speed_row = QHBoxLayout()
+        speed_row.addWidget(QLabel("EFFECT SPEED"))
+        speed_row.addStretch()
+        self.speed_label = QLabel("1.0×")
+        speed_row.addWidget(self.speed_label)
+        self.speed_slider = QSlider(Qt.Horizontal)
+        self.speed_slider.setRange(2, 40)
+        self.speed_slider.setValue(10)
+        self.speed_slider.valueChanged.connect(self._speed_changed)
+        advanced.addLayout(speed_row)
+        advanced.addWidget(self.speed_slider)
+        self.reactive_options = QGroupBox("REACTIVE LAB")
+        react_layout = QVBoxLayout(self.reactive_options)
+        reaction_row = QHBoxLayout()
+        for value, text_value in [(1, "On → Off"), (2, "Dim → Bright"), (3, "Bright → Dim"), (4, "Off → Dim"), (5, "Off → Bright")]:
+            option = QRadioButton(text_value)
+            self.react_buttons.addButton(option, value)
+            reaction_row.addWidget(option)
+            if value == 2:
+                option.setChecked(True)
+        react_layout.addLayout(reaction_row)
+        hold_row = QHBoxLayout()
+        for value, text_value in [(1, "Pulse once"), (2, "Stay bright while held")]:
+            option = QRadioButton(text_value)
+            self.hold_buttons.addButton(option, value)
+            hold_row.addWidget(option)
+            if value == 2:
+                option.setChecked(True)
+        hold_row.addStretch()
+        react_layout.addLayout(hold_row)
+        advanced.addWidget(self.reactive_options)
+        layout.addWidget(self.advanced_panel)
+        self.advanced_widgets.extend([self.advanced_panel])
+        layout.addStretch()
+        return page
+
+    def _audio_page(self):
+        page, layout = self._page("AUDIO REACTIVE", "Two local audio paths: microphone energy or Windows speaker beats.")
+        layout.addWidget(self._card_grid(self.AUDIO_IDS, 2))
+        audio = QFrame()
+        audio.setObjectName("glass")
+        audio_layout = QVBoxLayout(audio)
+        self.audio_source_label = QLabel("SPEAKER MODE listens to Windows output—not the microphone.")
+        self.audio_source_label.setObjectName("muted")
+        self.music_meter = QProgressBar()
+        self.music_meter.setRange(0, 100)
+        self.music_meter.setTextVisible(False)
+        audio_layout.addWidget(self.audio_source_label)
+        audio_layout.addWidget(self.music_meter)
+        layout.addWidget(audio)
+        layout.addStretch()
+        return page
+
+    def _device_page(self):
+        page, layout = self._page("DEVICE", "Capability-first detection for Lenovo LOQ white-backlit keyboards.")
+        panel = QFrame()
+        panel.setObjectName("glass")
+        info = QGridLayout(panel)
+        self.device_values = {}
+        for row, (key, title) in enumerate([("model", "SYSTEM"), ("capability", "BACKLIGHT"), ("native", "NATIVE LEVEL"), ("contract", "VANTAGE CONTRACT")]):
+            label = QLabel(title)
+            label.setObjectName("section")
+            value = QLabel("Detecting…")
+            value.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            self.device_values[key] = value
+            info.addWidget(label, row, 0)
+            info.addWidget(value, row, 1)
+        layout.addWidget(panel)
+        buttons = QHBoxLayout()
+        redetect = QPushButton("RE-DETECT HARDWARE")
+        redetect.clicked.connect(self.redetect)
+        copy = QPushButton("COPY DIAGNOSTICS")
+        copy.clicked.connect(self._copy_diagnostics)
+        buttons.addWidget(redetect)
+        buttons.addWidget(copy)
+        buttons.addStretch()
+        layout.addLayout(buttons)
+        layout.addStretch()
+        return page
+
+    def _settings_page(self):
+        page, layout = self._page("SETTINGS", "Simple by default. Experimental controls unlock only when requested.")
+        panel = QFrame()
+        panel.setObjectName("glass")
+        settings_layout = QVBoxLayout(panel)
+        self.startup_checkbox = QCheckBox("RUN AT WINDOWS STARTUP (VISIBLE IN TASK MANAGER)")
+        self.startup_checkbox.setChecked(startup_task_enabled())
+        self.startup_checkbox.toggled.connect(self._set_startup)
+        self.tray_checkbox = QCheckBox("KEEP RUNNING IN THE SYSTEM TRAY WHEN CLOSED")
+        self.tray_checkbox.setChecked(self.close_to_tray)
+        self.tray_checkbox.toggled.connect(self._set_close_to_tray)
+        self.animation_checkbox = QCheckBox("ENABLE INTERFACE ANIMATIONS")
+        self.animation_checkbox.setChecked(self.animations_enabled)
+        self.animation_checkbox.toggled.connect(self._set_animations)
+        self.god_checkbox = QCheckBox("ENABLE GOD MODE — ADVANCED LIGHTING CONTROLS")
+        self.god_checkbox.setChecked(self.god_mode)
+        self.god_checkbox.toggled.connect(self._toggle_god_mode)
+        for widget in [self.startup_checkbox, self.tray_checkbox, self.animation_checkbox, self.god_checkbox]:
+            settings_layout.addWidget(widget)
+        warning = QLabel("God Mode changes lighting timing only. It does not overclock the CPU, GPU, or keyboard hardware.")
+        warning.setObjectName("muted")
+        settings_layout.addWidget(warning)
+        layout.addWidget(panel)
+        self.god_settings = QGroupBox("GOD MODE  /  BATTERY SAVER LAB")
+        god_layout = QVBoxLayout(self.god_settings)
+        timeout_row = QHBoxLayout()
+        timeout_row.addWidget(QLabel("IDLE TIMEOUT"))
+        timeout_row.addStretch()
+        self.timeout_label = QLabel(f"{int(self.engine.idle_timeout)} SEC")
+        timeout_row.addWidget(self.timeout_label)
+        self.timeout_slider = QSlider(Qt.Horizontal)
+        self.timeout_slider.setRange(10, 300)
+        self.timeout_slider.setValue(int(self.engine.idle_timeout))
+        self.timeout_slider.valueChanged.connect(self._timeout_changed)
+        god_layout.addLayout(timeout_row)
+        god_layout.addWidget(self.timeout_slider)
+        layout.addWidget(self.god_settings)
+        self.advanced_widgets.append(self.god_settings)
+        reset = QPushButton("RESET INTERFACE DEFAULTS")
+        reset.clicked.connect(self._reset_defaults)
+        layout.addWidget(reset, 0, Qt.AlignLeft)
+        layout.addStretch()
+        return page
+
+    def _about_page(self):
+        page, layout = self._page("ABOUT", f"Lenovo LOQ Backlit Effects - Thrash  •  Version {APP_VERSION}")
+        panel = QFrame()
+        panel.setObjectName("glass")
+        box = QVBoxLayout(panel)
+        title = QLabel("T//  THRASH LIGHTING LAB")
+        title.setObjectName("title")
+        body = QLabel(
+            "A community-built controller for compatible Lenovo LOQ white-backlit keyboards.\n\n"
+            "Privacy: lighting, keyboard activity, and audio analysis remain on this PC. No recordings or telemetry are uploaded.\n\n"
+            "Compatibility: Lenovo Vantage must expose the supported white-backlight contract. RGB models are intentionally excluded.\n\n"
+            "Lenovo, LOQ, Legion, ASUS, TUF, and Armoury Crate are trademarks of their respective owners. This project is independent and unaffiliated."
+        )
+        body.setWordWrap(True)
+        body.setObjectName("muted")
+        credits = QLabel("© 2026 THRASH. OPEN-SOURCE COMMUNITY SOFTWARE.")
+        credits.setObjectName("section")
+        box.addWidget(title)
+        box.addWidget(body)
+        box.addSpacing(12)
+        box.addWidget(credits)
+        layout.addWidget(panel)
+        layout.addStretch()
+        return page
+
+    def _make_action_bar(self):
+        panel = QFrame()
+        panel.setObjectName("glass")
+        row = QHBoxLayout(panel)
+        row.setContentsMargins(15, 11, 15, 11)
+        row.addWidget(QLabel("INTENSITY"))
+        self.intensity_slider = QSlider(Qt.Horizontal)
+        self.intensity_slider.setRange(1, 100)
+        self.intensity_slider.setValue(self.intensity)
+        self.intensity_slider.valueChanged.connect(self._intensity_changed)
+        self.intensity_value = QLabel(f"{self.intensity}%")
+        self.intensity_value.setFixedWidth(45)
+        self.start_button = QPushButton("START MODE")
+        self.start_button.setObjectName("primary")
+        self.start_button.clicked.connect(self.toggle_effect)
+        light = QPushButton("LIGHT ON / OFF")
+        light.clicked.connect(self.toggle_light)
+        row.addWidget(self.intensity_slider, 1)
+        row.addWidget(self.intensity_value)
+        row.addSpacing(8)
+        row.addWidget(self.start_button)
+        row.addWidget(light)
+        return panel
+
+    def _build_tray(self):
+        self.tray_icon = QSystemTrayIcon(self.windowIcon(), self)
+        self.tray_icon.setToolTip("Lenovo LOQ Backlit Effects - Thrash")
+        menu = QMenu()
+        open_action = QAction("Open Lighting Lab", self)
+        open_action.triggered.connect(self._restore_from_tray)
+        battery_action = QAction("Arm Battery Saver", self)
+        battery_action.triggered.connect(self.arm_startup_battery_saver)
+        quit_action = QAction("Quit", self)
+        quit_action.triggered.connect(self._quit_application)
+        menu.addAction(open_action)
+        menu.addAction(battery_action)
+        menu.addSeparator()
+        menu.addAction(quit_action)
+        self.tray_icon.setContextMenu(menu)
+        self.tray_icon.activated.connect(self._tray_activated)
+        self.tray_icon.show()
+
+    def _select_effect(self, effect_id):
+        card = self.cards.get(effect_id)
+        if card:
+            card.setChecked(True)
+            self._effect_changed()
+
+    def selected_effect(self):
+        button = self.effect_buttons.checkedButton()
+        return button.property("effect_id") if button else "battery_saver"
+
+    def _effect_changed(self, _checked=False):
+        effect = self.selected_effect()
+        self.reactive_options.setVisible(self.god_mode and effect == "reactive")
+        self.advanced_panel.setVisible(self.god_mode)
+        self.audio_source_label.setText(
+            "MIC MODE follows the default microphone locally."
+            if effect == "music_mic" else
+            "SPEAKER MODE uses Windows loopback output and adaptive beat transients—not the microphone."
+        )
+
+    def _speed_changed(self, value):
+        self.speed_label.setText(f"{value / 10:.1f}×")
+        if self.god_mode and self.engine.running:
+            self.engine.speed = value / 10
+
+    def _intensity_changed(self, value):
+        self.intensity = value
+        self.intensity_value.setText(f"{value}%")
+        self.settings.setValue("intensity", value)
+        if self.engine.running:
+            self.engine.intensity = value
+
+    def _timeout_changed(self, value):
+        self.engine.idle_timeout = float(value)
+        self.timeout_label.setText(f"{value} SEC")
+        self.battery_note.setText(f"BATTERY SAVER  •  softly wakes to your chosen intensity  •  sleeps after {value} seconds")
+        self.settings.setValue("idleTimeout", value)
+
+    def _toggle_god_mode(self, enabled):
+        self.god_mode = bool(enabled)
+        self.settings.setValue("godMode", self.god_mode)
+        if enabled and self.animations_enabled:
+            for widget in self.advanced_widgets:
+                widget.hide()
+            self.god_overlay.play(lambda: self._apply_god_mode(repaint=True))
+        else:
+            self._apply_god_mode(repaint=True)
+
+    def _apply_god_mode(self, repaint=False):
+        for widget in self.advanced_widgets:
+            widget.setVisible(self.god_mode)
+        self.god_badge.setVisible(self.god_mode)
+        if hasattr(self, "reactive_options"):
+            self.reactive_options.setVisible(self.god_mode and self.selected_effect() == "reactive")
+        if repaint:
+            self._set_theme()
+            for card in self.cards.values():
+                card.update()
+
+    def _set_close_to_tray(self, enabled):
+        self.close_to_tray = bool(enabled)
+        self.settings.setValue("closeToTray", self.close_to_tray)
+
+    def _set_animations(self, enabled):
+        self.animations_enabled = bool(enabled)
+        self.settings.setValue("animations", self.animations_enabled)
+
+    def _reset_defaults(self):
+        self.god_checkbox.setChecked(False)
+        self.tray_checkbox.setChecked(True)
+        self.animation_checkbox.setChecked(True)
+        self.intensity_slider.setValue(50)
+        self.timeout_slider.setValue(30)
+        self.speed_slider.setValue(10)
+        self.react_buttons.button(2).setChecked(True)
+        self.hold_buttons.button(2).setChecked(True)
+        self.state_label.setText("DEFAULTS RESTORED")
+
+    def start_effect(self, start_asleep=False):
+        if self.ctrl.method != "lenovo_vantage_dll":
+            QMessageBox.warning(self, "Controller unavailable", "A compatible Lenovo white-backlight interface was not found.")
+            return False
+        effect = self.selected_effect()
+        try:
+            speed = self.speed_slider.value() / 10 if self.god_mode else None
+            mode = self.react_buttons.checkedId() if self.god_mode else 2
+            hold = self.hold_buttons.checkedId() if self.god_mode else 2
+            self.engine.start(effect, intensity=self.intensity, speed=speed, mode=mode,
+                              hold_behavior=hold, start_asleep=start_asleep)
+            name = next(item["name"] for item in EffectEngine.EFFECTS_META if item["id"] == effect)
+            self.state_label.setText(f"ACTIVE  /  {name.upper()}")
+            self.start_button.setText("STOP MODE")
+            self.start_button.setProperty("running", True)
+            self.start_button.style().unpolish(self.start_button)
+            self.start_button.style().polish(self.start_button)
+            return True
+        except Exception as exc:
+            QMessageBox.critical(self, "Could not start effect", str(exc))
+            return False
+
+    def arm_startup_battery_saver(self):
+        self._select_effect("battery_saver")
+        self.ctrl.set_brightness(0)
+        self.light_on = False
+        self.start_effect(start_asleep=True)
+
+    def stop_effect(self):
+        self.engine.stop()
+        self.state_label.setText("READY")
+        self.start_button.setText("START MODE")
+        self.start_button.setProperty("running", False)
+        self.start_button.style().unpolish(self.start_button)
+        self.start_button.style().polish(self.start_button)
+
+    def toggle_effect(self):
+        self.stop_effect() if self.engine.running else self.start_effect()
+
+    def toggle_light(self):
+        if self.engine.running:
+            self.stop_effect()
+        self.light_on = not self.light_on
+        target = max(1, int(round((self.intensity / 100.0) * self.ctrl.max_level))) if self.light_on else 0
+        target = min(self.ctrl.max_level, target)
+        if self.ctrl.set_brightness(target):
+            self.state_label.setText("LIGHT  /  ON" if self.light_on else "LIGHT  /  OFF")
+        else:
+            QMessageBox.warning(self, "Controller unavailable", "The keyboard command was not accepted.")
+
+    def redetect(self):
+        if self.engine.running:
+            self.stop_effect()
+        self.ctrl.detect_method()
+        self._refresh_status()
+
+    def _copy_diagnostics(self):
+        status = self.ctrl.get_status()
+        lines = [
+            f"Lenovo LOQ Backlit Effects - Thrash {APP_VERSION}",
+            f"System: {status.get('system_model', 'Unknown')}",
+            f"Bridge: {status.get('method_display', 'Unknown')}",
+            f"Capability: {status.get('backlight_level_type', 'Unknown')}",
+            f"Native level: {status.get('current_level', 'Unknown')} / {status.get('max_level', 'Unknown')}",
+            f"Contract: {status.get('contract_version', 'Unknown')}",
+            f"Administrator: {status.get('is_admin', False)}",
+            f"Last error: {status.get('last_error') or 'None'}",
+        ]
+        QApplication.clipboard().setText("\n".join(lines))
+        self.state_label.setText("DIAGNOSTICS COPIED")
+
+    def _set_startup(self, enabled):
+        try:
+            set_startup_task(enabled)
+            self.state_label.setText("STARTUP  /  ENABLED" if enabled else "STARTUP  /  DISABLED")
+        except Exception as exc:
+            self.startup_checkbox.blockSignals(True)
+            self.startup_checkbox.setChecked(not enabled)
+            self.startup_checkbox.blockSignals(False)
+            QMessageBox.warning(self, "Startup setting failed", str(exc))
+
+    def _refresh_status(self):
+        status = self.ctrl.get_status()
+        self.method_label.setText(f"{status.get('system_model', 'Lenovo LOQ')}  •  {status.get('method_display', 'Unknown')}")
+        method = status.get("method")
+        self.connection_dot.setStyleSheet(
+            "color:#2dd4bf; font-size:15px;" if method == "lenovo_vantage_dll" else
+            "color:#fbbf24; font-size:15px;" if method == "connecting" else
+            "color:#fb7185; font-size:15px;"
+        )
+        self.music_meter.setValue(int(self.engine.music_level * 100))
+        self.device_values["model"].setText(status.get("system_model", "Unknown"))
+        capability = status.get("backlight_level_type", "Unknown")
+        if status.get("compatible_white_backlight"):
+            capability += "  •  compatible white backlight"
+        self.device_values["capability"].setText(capability)
+        self.device_values["native"].setText(f"{status.get('current_level', 0)} of {status.get('max_level', 2)}")
+        self.device_values["contract"].setText(status.get("contract_version", "Unknown"))
+        if self.engine.running and self.engine.current_effect == "battery_saver":
+            if self.intensity != self.engine.intensity:
+                self.intensity = self.engine.intensity
+                self.intensity_slider.blockSignals(True)
+                self.intensity_slider.setValue(self.intensity)
+                self.intensity_slider.blockSignals(False)
+                self.intensity_value.setText(f"{self.intensity}%")
+                self.settings.setValue("intensity", self.intensity)
+            if self.engine.idle_sleeping:
+                self.state_label.setText("BATTERY SAVER  /  SLEEPING")
+            else:
+                remaining = max(0, int(math.ceil(self.engine.idle_timeout - self.engine.idle_seconds)))
+                self.state_label.setText(f"BATTERY SAVER  /  SLEEP IN {remaining}s")
+        if self.engine.last_error and self.engine.last_error != self._shown_error:
+            self._shown_error = self.engine.last_error
+            QMessageBox.warning(self, "Effect stopped", self.engine.last_error)
+        if not self.engine.running and self.start_button.property("running"):
+            self.start_button.setText("START MODE")
+            self.start_button.setProperty("running", False)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._has_animated and self.animations_enabled:
+            self._has_animated = True
+            self.setWindowOpacity(0.0)
+            self._entrance_animation = QPropertyAnimation(self, b"windowOpacity", self)
+            self._entrance_animation.setDuration(480)
+            self._entrance_animation.setStartValue(0.0)
+            self._entrance_animation.setEndValue(1.0)
+            self._entrance_animation.setEasingCurve(QEasingCurve.OutCubic)
+            self._entrance_animation.start()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "god_overlay"):
+            self.god_overlay.setGeometry(self.centralWidget().rect())
+
+    def _tray_activated(self, reason):
+        if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
+            self._restore_from_tray()
+
+    def _restore_from_tray(self):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _quit_application(self):
+        self._quitting = True
+        self.status_timer.stop()
+        self.engine.stop()
+        self.ctrl.shutdown()
+        self.tray_icon.hide()
+        QApplication.instance().quit()
+
+    def closeEvent(self, event):
+        if not self._quitting and self.close_to_tray and QSystemTrayIcon.isSystemTrayAvailable():
+            event.ignore()
+            self.hide()
+            if not self._tray_notice_shown:
+                self._tray_notice_shown = True
+                self.tray_icon.showMessage("Still running", "Lighting control continues in the system tray.", QSystemTrayIcon.Information, 3200)
+            return
+        self._quit_application()
+        event.accept()
+
 # ---------------------------------------------------------------------------
 #  Shutdown Hook
 # ---------------------------------------------------------------------------
@@ -1703,7 +2523,9 @@ if __name__ == "__main__":
         controller = bootstrap["controller"]
         engine = bootstrap["engine"]
         window = DesktopApplication(controller, engine)
-        if not startup_launch:
+        if startup_launch:
+            window.arm_startup_battery_saver()
+        else:
             window.show()
         splash.close()
 

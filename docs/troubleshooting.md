@@ -25,19 +25,23 @@ This is expected. It is a hidden, non-interactive bridge to Lenovo Vantage's .NE
 
 - Confirm Windows allows desktop applications to access the microphone.
 - Confirm the intended microphone is the Windows default input.
-- Increase sensitivity.
+- In God Mode, adjust effect speed if the response is too slow or too aggressive.
 - Close applications that hold the microphone exclusively.
 
 ## Music · Speaker does not move
 
 - Play audio through the current Windows default output device.
 - Re-select the mode after switching headphones or speakers.
-- Increase sensitivity.
+- Confirm the Windows output meter moves for the selected playback device.
 - Exclusive-mode playback can bypass Windows' software endpoint meter on some hardware.
 
 ## Effects stop unexpectedly
 
-The app displays the last effect error. Re-detect the Lenovo bridge and retry at a lower speed. Very high-frequency commands may be rejected by some firmware or Vantage versions.
+The app displays the last effect error. Re-detect the Lenovo bridge and retry. In God Mode, reduce speed if very high-frequency commands are rejected by the firmware or Vantage version.
+
+## Breathe still looks stepped
+
+The app updates its curve at 60 Hz, but compatible keyboards physically expose only Off, Dim, and Bright. Temporal blending makes those states look smoother; firmware latency and panel persistence vary by laptop. Use a moderate intensity and the automatic speed first. God Mode can expose speed tuning, but it cannot add hardware brightness levels.
 
 ## Unsupported model
 

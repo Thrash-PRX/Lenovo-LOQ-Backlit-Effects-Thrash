@@ -1,5 +1,5 @@
 #define MyAppName "Lenovo LOQ Backlit Effects - Thrash"
-#define MyAppVersion "2.1.1"
+#define MyAppVersion "3.1.1"
 #define MyAppPublisher "Thrash"
 #define MyAppExeName "LenovoLOQBacklitEffects-Thrash.exe"
 
@@ -37,7 +37,7 @@ VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription={#MyAppName} Installer
 VersionInfoProductName={#MyAppName}
 VersionInfoProductVersion={#MyAppVersion}
-VersionInfoVersion=2.1.1.0
+VersionInfoVersion=3.1.1.0
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -63,7 +63,7 @@ Root: HKA; Subkey: "Software\Microsoft\Windows\CurrentVersion\App Paths\{#MyAppE
 Root: HKA; Subkey: "Software\Microsoft\Windows\CurrentVersion\App Paths\{#MyAppExeName}"; ValueType: string; ValueName: "Path"; ValueData: "{app}"; Flags: uninsdeletekey
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent runascurrentuser
+Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
 Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /TN ""Lenovo LOQ Backlit Effects - Thrash"" /F"; Flags: runhidden; RunOnceId: "RemoveStartupTask"

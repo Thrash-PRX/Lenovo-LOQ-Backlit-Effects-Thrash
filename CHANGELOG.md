@@ -2,6 +2,32 @@
 
 All notable user-facing changes are documented here.
 
+## [3.1.1] - 2026-08-22
+
+### Added
+
+- Original five-section liquid-glass interface inspired by modern Lenovo gaming utilities
+- God Mode unlock animation and progressively disclosed speed, Reactive, and Battery Saver controls
+- Perceived 1–100 intensity control using 60 Hz pulse-density blending over native keyboard levels
+- Battery Saver soft wake, 30-second idle sleep, and dark-at-startup behavior
+- Capability-first support for additional Lenovo LOQ white-backlit models
+- Device diagnostics, privacy, compatibility, credits, and expanded settings pages
+- Generated Thrash liquid-glass background artwork
+
+### Changed
+
+- Rebuilt Breathe with a continuous sine-eased curve instead of step-like delays
+- Streamlined normal Reactive behavior to dim idle, brighten on input, fade on release, and stay active while held
+- Improved speaker-output beat tracking while keeping microphone and speaker paths separate
+- Renamed Default Backlight to Battery Saver and preserved the selected intensity on wake
+- Hid all speed and alternate reactive options unless God Mode is enabled
+- Corrected Lenovo lighting shortcut guidance to Fn+Space; Fn+Q remains the thermal-mode shortcut
+- Updated application, executable, and installer metadata to 3.1.1
+
+### Removed
+
+- Blink, Strobe, SOS, Lightning, and Candle from the available mode catalog
+
 ## [2.1.1] - 2026-08-21
 
 ### Added

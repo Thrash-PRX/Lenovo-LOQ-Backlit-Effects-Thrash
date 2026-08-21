@@ -5,7 +5,8 @@ It does not contain a private signing key or password.
 
 The installer deliberately does not add this self-signed certificate to the
 Windows trust stores. Before trusting it manually, confirm that the certificate
-subject is CN=Thrash and verify the published SHA-256 checksums against the
+subject is CN=Thrash, its v3 thumbprint is
+073BC8EB140BE7D355B96E35F584DAC3EAD81610, and verify the published SHA-256 checksums against the
 official GitHub release.
 
 Official releases:

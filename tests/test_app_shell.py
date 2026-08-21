@@ -36,6 +36,12 @@ class DummyEngine:
 
     def __init__(self):
         self.stop_calls = 0
+        self.start_calls = []
+
+    def start(self, effect, **kwargs):
+        self.running = True
+        self.current_effect = effect
+        self.start_calls.append((effect, kwargs))
 
     def stop(self):
         self.stop_calls += 1
@@ -84,6 +90,25 @@ class DesktopShellTests(unittest.TestCase):
         ):
             app.set_startup_task(True)
         self.assertEqual(calls, ["task", "run:True"])
+
+    def test_normal_mode_hides_all_advanced_controls(self):
+        window = app.DesktopApplication(DummyController(), DummyEngine())
+        window.god_checkbox.setChecked(False)
+        self.qt_app.processEvents()
+        self.assertTrue(all(widget.isHidden() for widget in window.advanced_widgets))
+        window._quit_application()
+
+    def test_startup_battery_saver_starts_asleep(self):
+        controller = DummyController()
+        controller.levels = []
+        controller.set_brightness = lambda level: controller.levels.append(level) or True
+        engine = DummyEngine()
+        window = app.DesktopApplication(controller, engine)
+        window.arm_startup_battery_saver()
+        self.assertEqual(controller.levels[-1], 0)
+        self.assertEqual(engine.start_calls[-1][0], "battery_saver")
+        self.assertTrue(engine.start_calls[-1][1]["start_asleep"])
+        window._quit_application()
 
 
 if __name__ == "__main__":

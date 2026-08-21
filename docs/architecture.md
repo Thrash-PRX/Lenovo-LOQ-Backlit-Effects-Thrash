@@ -7,7 +7,7 @@ Qt desktop UI
     │
     ├── EffectEngine worker thread
     │       ├── Timed brightness patterns
-    │       ├── Windows keyboard hook (Reactive and Default Backlight)
+    │       ├── Windows keyboard hook (Reactive and Battery Saver)
     │       ├── PortAudio input (Music · Mic only)
     │       └── Windows Core Audio peak meter (Music · Speaker only)
     │
@@ -30,7 +30,9 @@ The helper is created with `CREATE_NO_WINDOW`, receives only fixed brightness to
 
 ## Effect engine
 
-Effects execute on a daemon worker thread. The controller serializes hardware writes with a lock. Stopping an effect signals an event, joins the worker, closes effect-specific audio resources, and restores full brightness.
+Effects execute on a daemon worker thread. The controller serializes hardware writes with a lock. Stopping an effect signals an event, joins the worker, closes effect-specific audio resources, and restores the nearest native level for the selected intensity.
+
+Lenovo's white-backlight contract exposes either one or two illuminated levels plus off. The 1–100 control, Breathe, fades, and Wave use 60 Hz pulse-density blending between adjacent native states. This improves perceived smoothness but does not invent additional hardware brightness levels or spatial zones.
 
 ## Audio modes
 
@@ -41,10 +43,10 @@ Microphone energy uses adaptive floor/peak normalization. Speaker mode compares 
 
 ## Battery saver and startup
 
-Default Backlight uses the existing global keyboard hook to refresh its activity timestamp. The worker holds full brightness during activity, switches off after 10 seconds without a keypress, and wakes immediately on the next keydown.
+Battery Saver uses the global keyboard hook to refresh its activity timestamp. A startup launch begins with the keyboard off. The first keydown performs a sine-eased wake to the remembered intensity; the light fades off after 30 seconds without a keypress. When Space is observed, the worker polls Lenovo's native state after the firmware shortcut settles so Fn+Space changes can be synchronized when the contract reports them.
 
 The startup toggle creates or removes two linked per-user entries: a Windows `Run` value visible in Task Manager's Startup apps page, and an on-demand Task Scheduler action with `HighestAvailable` privileges. At sign-in the Run value starts the task, which launches the app hidden in the notification area. No background service is installed.
 
 ## Packaging
 
-PyInstaller creates a one-file Windows executable containing Python, Qt, the application icon, PortAudio support, and Core Audio bindings. Lenovo proprietary assemblies are intentionally discovered at runtime and are never included.
+PyInstaller creates an application folder containing Python, Qt, the application artwork, PortAudio support, and Core Audio bindings. Inno Setup compresses that folder and verification documents into one installer. Lenovo proprietary assemblies are intentionally discovered at runtime and are never included.
