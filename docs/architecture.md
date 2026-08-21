@@ -43,7 +43,7 @@ Microphone energy uses adaptive floor/peak normalization. Speaker mode compares 
 
 Default Backlight uses the existing global keyboard hook to refresh its activity timestamp. The worker holds full brightness during activity, switches off after 10 seconds without a keypress, and wakes immediately on the next keydown.
 
-The startup toggle creates or removes a per-user Windows Task Scheduler entry with `ONLOGON` and `HIGHEST` settings. No background service is installed.
+The startup toggle creates or removes two linked per-user entries: a Windows `Run` value visible in Task Manager's Startup apps page, and an on-demand Task Scheduler action with `HighestAvailable` privileges. At sign-in the Run value starts the task, which launches the app hidden in the notification area. No background service is installed.
 
 ## Packaging
 

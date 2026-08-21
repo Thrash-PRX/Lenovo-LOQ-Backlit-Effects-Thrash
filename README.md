@@ -51,10 +51,10 @@ The release is signed with a self-signed `CN=Thrash` certificate. A self-signed 
 3. Select a lighting-mode card.
 4. Adjust **Speed**. For music effects this control becomes **Sensitivity**.
 5. Select **Start Mode**.
-6. Optionally enable **Run at Windows Startup**. The app creates an elevated per-user Task Scheduler entry so it can start without a second UAC prompt at every sign-in.
+6. Optionally enable **Run at Windows Startup**. The app appears in Task Manager's **Startup apps** list and launches its elevated lighting task directly to the system tray at sign-in.
 7. Use **Light On / Off** for manual control or **Re-detect** if Lenovo Vantage was updated while the app was open.
 
-Closing the application restores the keyboard to full brightness.
+Choosing **Quit** from the system-tray menu stops the active effect and shuts down the lighting bridge cleanly.
 
 ## Effects
 
@@ -87,7 +87,9 @@ Closing the application restores the keyboard to full brightness.
 
 **Default Backlight** is the normal non-animated mode. It holds the keyboard at full brightness while you are active, switches the light off after 10 seconds without a keypress, and restores it on the next keypress.
 
-**Run at Windows Startup** creates a per-user Task Scheduler entry named `Lenovo LOQ Backlit Effects - Thrash` with highest privileges. Disable the same checkbox to remove the task. The setting affects only this application and does not install a service.
+Closing the main window keeps lighting effects alive in the Windows notification area. Click or double-click the tray icon to reopen the app, or use its **Quit** command to stop the effects and exit completely.
+
+**Run at Windows Startup** creates a Task Manager-visible entry under the current user's Windows `Run` key. That entry starts an on-demand Task Scheduler action named `Lenovo LOQ Backlit Effects - Thrash` with highest privileges, allowing the hardware controller to start minimized to the tray without a second UAC prompt. Disable the checkbox to remove both entries. The setting affects only this application and does not install a service.
 
 ## Why PowerShell appears in Task Manager
 

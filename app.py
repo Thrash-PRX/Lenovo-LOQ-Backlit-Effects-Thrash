@@ -19,15 +19,17 @@ import random
 import datetime
 import queue
 import math
+import tempfile
+from xml.sax.saxutils import escape as xml_escape
 from PySide6.QtCore import Qt, QTimer, QRectF, QPointF, QEasingCurve, QPropertyAnimation
 from PySide6.QtGui import (
-    QColor, QFont, QIcon, QLinearGradient, QPainter,
+    QAction, QColor, QFont, QIcon, QLinearGradient, QPainter,
     QPen, QRadialGradient,
 )
 from PySide6.QtWidgets import (
     QAbstractButton, QApplication, QButtonGroup, QCheckBox, QFrame, QGridLayout, QGroupBox,
-    QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QRadioButton,
-    QProgressBar, QSizePolicy, QSlider, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox, QPushButton, QRadioButton,
+    QProgressBar, QSizePolicy, QSlider, QSystemTrayIcon, QVBoxLayout, QWidget,
 )
 
 # Define hook-related types and signatures for ctypes
@@ -92,14 +94,15 @@ def resource_path(relative_path):
 
 APP_VERSION = "2.1.1"
 STARTUP_TASK_NAME = "Lenovo LOQ Backlit Effects - Thrash"
+STARTUP_RUN_VALUE = "Lenovo LOQ Backlit Effects - Thrash"
+STARTUP_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 
 def _hidden_process_kwargs():
     return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
 
 
-def startup_task_enabled():
-    """Return whether the per-user Windows logon task exists."""
+def _startup_task_exists():
     try:
         result = subprocess.run(
             ["schtasks", "/Query", "/TN", STARTUP_TASK_NAME],
@@ -113,30 +116,139 @@ def startup_task_enabled():
         return False
 
 
-def set_startup_task(enabled):
-    """Create or remove the elevated per-user Windows logon task."""
-    if enabled:
-        if getattr(sys, "frozen", False):
-            target = f'"{sys.executable}"'
-        else:
-            target = f'"{sys.executable}" "{os.path.abspath(__file__)}"'
-        command = [
-            "schtasks", "/Create", "/TN", STARTUP_TASK_NAME,
-            "/TR", target, "/SC", "ONLOGON", "/RL", "HIGHEST", "/F",
-        ]
-    else:
-        command = ["schtasks", "/Delete", "/TN", STARTUP_TASK_NAME, "/F"]
-
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        check=False,
-        **_hidden_process_kwargs(),
+def _startup_run_command():
+    schtasks = os.path.join(
+        os.environ.get("SystemRoot", r"C:\Windows"), "System32", "schtasks.exe"
     )
-    if result.returncode != 0 and not (not enabled and result.returncode == 1):
-        detail = (result.stderr or result.stdout or "Task Scheduler rejected the request").strip()
-        raise RuntimeError(detail)
+    return f'"{schtasks}" /Run /TN "{STARTUP_TASK_NAME}"'
+
+
+def _startup_registry_enabled():
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_RUN_KEY) as key:
+            value, _ = winreg.QueryValueEx(key, STARTUP_RUN_VALUE)
+        return STARTUP_TASK_NAME in str(value)
+    except OSError:
+        return False
+
+
+def startup_task_enabled():
+    """Return whether the Task Manager-visible startup launcher is complete."""
+    return _startup_task_exists() and _startup_registry_enabled()
+
+
+def _startup_action():
+    if getattr(sys, "frozen", False):
+        return sys.executable, "--startup", os.path.dirname(sys.executable)
+    script = os.path.abspath(__file__)
+    return sys.executable, f'"{script}" --startup', os.path.dirname(script)
+
+
+def _create_startup_task():
+    executable, arguments, working_dir = _startup_action()
+    domain = os.environ.get("USERDOMAIN", "")
+    username = os.environ.get("USERNAME", "")
+    user_id = f"{domain}\\{username}" if domain else username
+    task_xml = f'''<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>Starts Lenovo LOQ Backlit Effects in the notification area.</Description></RegistrationInfo>
+  <Principals>
+    <Principal id="Author">
+      <UserId>{xml_escape(user_id)}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{xml_escape(executable)}</Command>
+      <Arguments>{xml_escape(arguments)}</Arguments>
+      <WorkingDirectory>{xml_escape(working_dir)}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+'''
+    xml_path = None
+    try:
+        handle, xml_path = tempfile.mkstemp(prefix="loq-startup-", suffix=".xml")
+        os.close(handle)
+        with open(xml_path, "w", encoding="utf-16") as xml_file:
+            xml_file.write(task_xml)
+        result = subprocess.run(
+            ["schtasks", "/Create", "/TN", STARTUP_TASK_NAME, "/XML", xml_path, "/F"],
+            capture_output=True,
+            text=True,
+            check=False,
+            **_hidden_process_kwargs(),
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "Task Scheduler rejected the request").strip()
+            raise RuntimeError(detail)
+    finally:
+        if xml_path:
+            try:
+                os.unlink(xml_path)
+            except OSError:
+                pass
+
+
+def _set_startup_registry(enabled):
+    import winreg
+    if enabled:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, STARTUP_RUN_KEY) as key:
+            winreg.SetValueEx(key, STARTUP_RUN_VALUE, 0, winreg.REG_SZ, _startup_run_command())
+        return
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, STARTUP_RUN_KEY, 0, winreg.KEY_SET_VALUE
+        ) as key:
+            winreg.DeleteValue(key, STARTUP_RUN_VALUE)
+    except FileNotFoundError:
+        pass
+
+
+def set_startup_task(enabled):
+    """Register an elevated on-demand task and a Task Manager startup entry."""
+    if enabled:
+        _create_startup_task()
+        try:
+            _set_startup_registry(True)
+        except Exception:
+            subprocess.run(
+                ["schtasks", "/Delete", "/TN", STARTUP_TASK_NAME, "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                **_hidden_process_kwargs(),
+            )
+            raise
+    else:
+        _set_startup_registry(False)
+        result = subprocess.run(
+            ["schtasks", "/Delete", "/TN", STARTUP_TASK_NAME, "/F"],
+            capture_output=True,
+            text=True,
+            check=False,
+            **_hidden_process_kwargs(),
+        )
+        if result.returncode != 0 and result.returncode != 1:
+            detail = (result.stderr or result.stdout or "Task Scheduler rejected the request").strip()
+            raise RuntimeError(detail)
     return enabled
 
 # ---------------------------------------------------------------------------
@@ -1094,13 +1206,48 @@ class DesktopApplication(QMainWindow):
         self._shown_error = None
         self._entrance_animation = None
         self._has_animated = False
+        self._quitting = False
+        self._tray_notice_shown = False
         self._build_ui()
+        self._build_tray()
         self._effect_changed()
 
         self.status_timer = QTimer(self)
         self.status_timer.timeout.connect(self._refresh_status)
         self.status_timer.start(500)
         self._refresh_status()
+
+    def _build_tray(self):
+        self.tray_icon = QSystemTrayIcon(self.windowIcon(), self)
+        self.tray_icon.setToolTip("Lenovo LOQ Backlit Effects - Thrash")
+        tray_menu = QMenu()
+        open_action = QAction("Open Lenovo LOQ Backlit Effects", self)
+        open_action.triggered.connect(self._restore_from_tray)
+        quit_action = QAction("Quit", self)
+        quit_action.triggered.connect(self._quit_application)
+        tray_menu.addAction(open_action)
+        tray_menu.addSeparator()
+        tray_menu.addAction(quit_action)
+        self.tray_icon.setContextMenu(tray_menu)
+        self.tray_icon.activated.connect(self._tray_activated)
+        self.tray_icon.show()
+
+    def _tray_activated(self, reason):
+        if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
+            self._restore_from_tray()
+
+    def _restore_from_tray(self):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _quit_application(self):
+        self._quitting = True
+        self.status_timer.stop()
+        self.engine.stop()
+        self.ctrl.shutdown()
+        self.tray_icon.hide()
+        QApplication.instance().quit()
 
     def _build_ui(self):
         self.setWindowTitle("Lenovo LOQ Backlit Effects - Thrash")
@@ -1301,7 +1448,7 @@ class DesktopApplication(QMainWindow):
         self.startup_checkbox = QCheckBox("RUN AT WINDOWS STARTUP")
         self.startup_checkbox.setChecked(startup_task_enabled())
         self.startup_checkbox.toggled.connect(self._set_startup)
-        startup_note = QLabel("Launches elevated through Windows Task Scheduler")
+        startup_note = QLabel("Appears in Task Manager Startup apps  •  launches elevated to the system tray")
         startup_note.setObjectName("hint")
         preferences.addWidget(self.startup_checkbox)
         preferences.addWidget(startup_note)
@@ -1459,9 +1606,19 @@ class DesktopApplication(QMainWindow):
             self.stop_effect()
 
     def closeEvent(self, event):
-        self.status_timer.stop()
-        self.engine.stop()
-        self.ctrl.shutdown()
+        if not self._quitting and QSystemTrayIcon.isSystemTrayAvailable():
+            event.ignore()
+            self.hide()
+            if not self._tray_notice_shown:
+                self._tray_notice_shown = True
+                self.tray_icon.showMessage(
+                    "Still running",
+                    "Lenovo LOQ Backlit Effects is active in the system tray. Use the tray menu to quit.",
+                    QSystemTrayIcon.Information,
+                    3500,
+                )
+            return
+        self._quit_application()
         event.accept()
 
 # ---------------------------------------------------------------------------
@@ -1481,6 +1638,8 @@ def cleanup():
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    startup_launch = "--startup" in sys.argv
+
     # The packaged EXE is built with a requireAdministrator manifest. When
     # running from source, still provide a friendly UAC elevation fallback.
     if not is_admin():
@@ -1499,6 +1658,9 @@ if __name__ == "__main__":
             print(f"Administrator privileges are required: {exc}")
             sys.exit(1)
 
+    if startup_launch:
+        sys.argv.remove("--startup")
+
     qt_app = QApplication(sys.argv)
     qt_app.setApplicationName("Lenovo LOQ Backlit Effects - Thrash")
     qt_app.setApplicationDisplayName("Lenovo LOQ Backlit Effects - Thrash")
@@ -1506,9 +1668,13 @@ if __name__ == "__main__":
     qt_app.setOrganizationName("Thrash")
     qt_app.setWindowIcon(QIcon(resource_path(os.path.join("assets", "app-icon.png"))))
     qt_app.setFont(QFont("Segoe UI Variable Text", 10))
+    qt_app.setQuitOnLastWindowClosed(False)
 
     splash = BootSplash()
-    splash.show()
+    if startup_launch:
+        splash.started -= 2.4
+    else:
+        splash.show()
     bootstrap = {}
 
     def initialize_hardware():
@@ -1537,7 +1703,8 @@ if __name__ == "__main__":
         controller = bootstrap["controller"]
         engine = bootstrap["engine"]
         window = DesktopApplication(controller, engine)
-        window.show()
+        if not startup_launch:
+            window.show()
         splash.close()
 
     boot_timer.timeout.connect(finish_boot)

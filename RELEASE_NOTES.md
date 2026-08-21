@@ -9,6 +9,8 @@ A sharper interface, beat-focused speaker lighting, and automatic battery saving
 - Automatic backlight sleep after 10 idle seconds
 - Immediate wake on the next keyboard input
 - Run at Windows Startup toggle using an elevated per-user scheduled task
+- Task Manager-visible Startup apps registration and tray-only boot launch
+- Closing the main window now keeps active effects running in the system tray
 - Adaptive speaker beat detection based on transient onsets instead of raw volume alone
 - Microphone and speaker modes remain separate and clearly labeled
 - One compressed installer with shortcuts, verification files, and clean uninstall support
