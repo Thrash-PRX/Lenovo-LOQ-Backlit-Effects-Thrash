@@ -22,12 +22,12 @@ import math
 import tempfile
 from xml.sax.saxutils import escape as xml_escape
 from PySide6.QtCore import (
-    Qt, QTimer, QRectF, QPointF, QEasingCurve, QPropertyAnimation,
+    Qt, QEvent, QTimer, QRectF, QPointF, QEasingCurve, QPropertyAnimation,
     QSettings, QVariantAnimation,
 )
 from PySide6.QtGui import (
-    QAction, QColor, QFont, QIcon, QLinearGradient, QPainter, QPixmap,
-    QPen, QRadialGradient,
+    QAction, QBrush, QColor, QFont, QFontMetrics, QIcon, QLinearGradient, QPainter, QPixmap,
+    QPainterPath, QPen, QRadialGradient,
 )
 from PySide6.QtWidgets import (
     QAbstractButton, QApplication, QButtonGroup, QCheckBox, QFrame, QGridLayout, QGroupBox,
@@ -583,12 +583,12 @@ class KeyboardBacklightController:
 class EffectEngine:
     EFFECTS_META = [
         {"id": "battery_saver", "name": "Battery Saver", "icon": "◉",  "desc": "Wakes softly, sleeps after 30 seconds"},
-        {"id": "breathe",   "name": "Breathe",        "icon": "◌",     "desc": "Fluid sine-curve breathing"},
+        {"id": "breathe",   "name": "Breathe",        "icon": "◌",     "desc": "Slow, symmetrical soft breathing"},
         {"id": "heartbeat", "name": "Heartbeat",      "icon": "♥",     "desc": "Double-pulse heartbeat rhythm"},
         {"id": "disco",     "name": "Disco",          "icon": "✦",     "desc": "Random high-energy flashing"},
         {"id": "pulse",     "name": "Pulse",          "icon": "◍",     "desc": "Quick flash with a slow fade"},
         {"id": "binary",    "name": "Binary Clock",   "icon": "01",    "desc": "Encodes seconds in binary"},
-        {"id": "wave",      "name": "Wave",           "icon": "≈",     "desc": "Rolling brightness crest"},
+        {"id": "wave",      "name": "Surge Wave",     "icon": "≈",     "desc": "Fast crest with a long trailing ripple"},
         {"id": "reactive",  "name": "Reactive",       "icon": "⌨",     "desc": "Brightens on every keypress"},
         {"id": "music_mic", "name": "Music / Mic",    "icon": "♪",     "desc": "Follows the default microphone"},
         {"id": "music_speaker", "name": "Music / Speaker", "icon": "♫", "desc": "Beat detection from speaker output"},
@@ -606,6 +606,16 @@ class EffectEngine:
         "music_mic": 1.15,
         "music_speaker": 1.35,
     }
+    SPEED_LIMITS = {
+        "breathe": (0.45, 1.65),
+        "wave": (0.55, 2.20),
+        "reactive": (0.55, 2.00),
+    }
+
+    @classmethod
+    def clamp_speed(cls, effect, speed):
+        low, high = cls.SPEED_LIMITS.get(effect, (0.20, 4.00))
+        return max(low, min(float(speed), high))
 
     def __init__(self, ctrl):
         self.ctrl = ctrl
@@ -626,10 +636,12 @@ class EffectEngine:
         self._hook_handle = None
         self._hook_thread = None
         self._hook_thread_id = None
+        self._hook_ready_event = threading.Event()
         self._keypress_event = threading.Event()
         self._keyrelease_event = threading.Event()
         self._hook_proc = None
         self._pressed_keys = set()
+        self._keypress_counter = 0
         self._keys_lock = threading.Lock()
         self._music_stream = None
         self._music_floor = 0.01
@@ -658,7 +670,7 @@ class EffectEngine:
         self.stop(restore=False)
         self.current_effect = effect
         recommended = self.RECOMMENDED_SPEEDS.get(effect, 1.0)
-        self.speed = max(0.1, min(recommended if speed is None else speed, 5.0))
+        self.speed = self.clamp_speed(effect, recommended if speed is None else speed)
         self.intensity = max(1, min(int(intensity), 100))
         self.mode = mode
         self.hold_behavior = hold_behavior
@@ -681,12 +693,15 @@ class EffectEngine:
         self.music_level = 0.0
         with self._keys_lock:
             self._pressed_keys.clear()
+            self._keypress_counter = 0
         self.running = True
         self._stop.clear()
 
         # Reactive and battery-saving default modes both need global input.
         if self.current_effect in ("reactive", "battery_saver"):
-            self._start_keyboard_hook()
+            if not self._start_keyboard_hook():
+                self.running = False
+                raise RuntimeError(self.last_error or "Could not start the Windows keyboard hook")
 
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
@@ -742,40 +757,81 @@ class EffectEngine:
 
     def _start_keyboard_hook(self):
         """Starts the low-level global Windows keyboard hook thread."""
+        if self._hook_thread and self._hook_thread.is_alive():
+            self._stop_keyboard_hook()
+            if self._hook_thread and self._hook_thread.is_alive():
+                self.last_error = "The previous keyboard hook did not stop cleanly"
+                return False
         self._keypress_event.clear()
+        self._keyrelease_event.clear()
+        self._hook_ready_event.clear()
         self._hook_thread = threading.Thread(target=self._hook_message_loop, daemon=True)
         self._hook_thread.start()
+        if not self._hook_ready_event.wait(timeout=0.50):
+            self.last_error = "Windows did not initialize the keyboard hook in time"
+            self._stop_keyboard_hook()
+            return False
+        return bool(self._hook_handle)
 
     def _stop_keyboard_hook(self):
         """Terminates the hook loop and removes the global hook."""
         if self._hook_thread_id:
-            user32.PostThreadMessageW(self._hook_thread_id, 0x0012, 0, 0) # WM_QUIT
+            for _attempt in range(5):
+                if user32.PostThreadMessageW(self._hook_thread_id, 0x0012, 0, 0):
+                    break
+                time.sleep(0.01)
         if (self._hook_thread and self._hook_thread.is_alive()
                 and self._hook_thread is not threading.current_thread()):
             self._hook_thread.join(timeout=1)
         self._keypress_event.clear()
+        self._keyrelease_event.clear()
+        self._hook_ready_event.clear()
+        with self._keys_lock:
+            self._pressed_keys.clear()
+        if self._hook_thread and not self._hook_thread.is_alive():
+            self._hook_thread = None
+
+    def _record_key_down(self, identity, vk_code=None):
+        """Record one physical key without treating auto-repeat as another press."""
+        self._last_key_vk = identity[0] if vk_code is None and isinstance(identity, tuple) else (
+            identity if vk_code is None else vk_code
+        )
+        with self._keys_lock:
+            if identity in self._pressed_keys:
+                return False
+            self._pressed_keys.add(identity)
+            self._keypress_counter += 1
+        self._keypress_event.set()
+        return True
+
+    def _record_key_up(self, identity):
+        """Release one physical key and signal only when every key is released."""
+        with self._keys_lock:
+            self._pressed_keys.discard(identity)
+            all_released = not self._pressed_keys
+        if all_released:
+            self._keyrelease_event.set()
+        return all_released
 
     def _hook_message_loop(self):
         """Standard Windows message loop that handles keyboard events."""
         self._hook_thread_id = kernel32.GetCurrentThreadId()
+        msg = wintypes.MSG()
+        # Force Windows to create this thread's message queue before signalling
+        # readiness, so WM_QUIT cannot be lost during a quick effect switch.
+        user32.PeekMessageW(ctypes.byref(msg), 0, 0, 0, 0)
+
         def hook_cb(nCode, wParam, lParam):
             try:
                 if nCode >= 0 and self.running:
                     kbd = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
                     vk = kbd.vkCode
+                    identity = (vk, kbd.scanCode, kbd.flags & 0x01)
 
                     if wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
-                        self._last_key_vk = vk
-                        with self._keys_lock:
-                            is_repeat = vk in self._pressed_keys
-                            if not is_repeat:
-                                self._pressed_keys.add(vk)
-                        self._keypress_event.set()
+                        self._record_key_down(identity, vk)
                     elif wParam in (WM_KEYUP, WM_SYSKEYUP):
-                        with self._keys_lock:
-                            self._pressed_keys.discard(vk)
-                            if len(self._pressed_keys) == 0:
-                                self._keyrelease_event.set()
+                        self._record_key_up(identity)
             except Exception as e:
                 print(f"Keyboard hook exception: {e}")
             return user32.CallNextHookEx(None, nCode, wParam, lParam)
@@ -791,19 +847,27 @@ class EffectEngine:
             0
         )
 
-        if not self._hook_handle:
-            print(f"Global Keyboard Hook failed! Error: {kernel32.GetLastError()}")
-            return
+        try:
+            if not self._hook_handle:
+                error = kernel32.GetLastError()
+                self.last_error = f"Global keyboard hook failed (Windows error {error})"
+                print(self.last_error)
+                self._hook_ready_event.set()
+                return
 
-        msg = wintypes.MSG()
-        while self.running and user32.GetMessageW(ctypes.byref(msg), 0, 0, 0) != 0:
-            user32.TranslateMessage(ctypes.byref(msg))
-            user32.DispatchMessageW(ctypes.byref(msg))
-
-        if self._hook_handle:
-            user32.UnhookWindowsHookEx(self._hook_handle)
-        self._hook_handle = None
-        self._hook_thread_id = None
+            self._hook_ready_event.set()
+            while self.running:
+                message_result = user32.GetMessageW(ctypes.byref(msg), 0, 0, 0)
+                if message_result <= 0:
+                    break
+                user32.TranslateMessage(ctypes.byref(msg))
+                user32.DispatchMessageW(ctypes.byref(msg))
+        finally:
+            if self._hook_handle:
+                user32.UnhookWindowsHookEx(self._hook_handle)
+            self._hook_handle = None
+            self._hook_thread_id = None
+            self._hook_ready_event.set()
 
     # -- Effects ------------------------------------------------------------
 
@@ -879,29 +943,46 @@ class EffectEngine:
     def _breathe_envelope(phase):
         """Gentle 0→1→0 curve with soft shoulders and no abrupt level jumps."""
         phase = max(0.0, min(1.0, float(phase)))
-        return math.sin(math.pi * phase) ** 2.2
+        return math.sin(math.pi * phase) ** 1.28
 
     def _breathe(self):
         """Stable high-rate pulse-density breathe for Lenovo's 3 native levels."""
-        cycle = 5.6 / self.speed
         frame = 1.0 / 96.0
-        started = time.monotonic()
-        deadline = started
-        previous_cycle = -1
+        deadline = time.monotonic()
+        previous = deadline
+        phase = 0.0
         while self.running:
             now = time.monotonic()
-            cycle_index = int((now - started) / cycle)
-            if cycle_index != previous_cycle:
-                self._pdm_error = 0.0
-                previous_cycle = cycle_index
-            phase = ((now - started) % cycle) / cycle
+            phase = (phase + (now - previous) * self.speed / 5.6) % 1.0
+            previous = now
             self._render_intensity(self.intensity * self._breathe_envelope(phase))
             deadline += frame
-            if self._wait(max(0.001, deadline - time.monotonic())):
+            delay = deadline - time.monotonic()
+            if delay <= 0:
+                deadline = time.monotonic() + frame
+                delay = frame
+            if self._wait(delay):
                 return True
-            if time.monotonic() - deadline > frame * 3:
-                deadline = time.monotonic()
         return True
+
+    @staticmethod
+    def _wave_envelope(phase):
+        """Single-zone surge: sharp front, held crest, tail, then a smaller ripple."""
+        phase = max(0.0, min(1.0, float(phase)))
+        if phase < 0.12:
+            return math.sin((phase / 0.12) * math.pi / 2) ** 1.35
+        if phase < 0.28:
+            return 1.0
+        if phase < 0.68:
+            tail = (phase - 0.28) / 0.40
+            return 0.10 + 0.90 * (1.0 - tail) ** 2.15
+        if phase < 0.78:
+            ripple = (phase - 0.68) / 0.10
+            return 0.10 + 0.38 * math.sin(ripple * math.pi / 2) ** 1.4
+        if phase < 0.94:
+            ripple_tail = (phase - 0.78) / 0.16
+            return 0.48 * (1.0 - ripple_tail) ** 1.8
+        return 0.0
 
     def _heartbeat(self):
         b, p, r = 0.12 / self.speed, 0.15 / self.speed, 0.7 / self.speed
@@ -935,17 +1016,22 @@ class EffectEngine:
         if self._wait(0.6 / self.speed): return True
 
     def _wave(self):
-        """A quicker asymmetric rolling crest for a single-zone keyboard."""
-        cycle = 2.8 / self.speed
-        started = time.monotonic()
+        """A visibly asymmetric surge and secondary ripple for one lighting zone."""
+        frame = 1.0 / 96.0
+        deadline = time.monotonic()
+        previous = deadline
+        phase = 0.0
         while self.running:
-            phase = ((time.monotonic() - started) % cycle) / cycle
-            if phase < 0.32:
-                envelope = math.sin((phase / 0.32) * math.pi / 2) ** 1.4
-            else:
-                envelope = max(0.0, math.cos(((phase - 0.32) / 0.68) * math.pi / 2)) ** 2.2
-            self._render_intensity(self.intensity * envelope)
-            if self._wait(1.0 / 60.0):
+            now = time.monotonic()
+            phase = (phase + (now - previous) * self.speed / 3.6) % 1.0
+            previous = now
+            self._render_intensity(self.intensity * self._wave_envelope(phase))
+            deadline += frame
+            delay = deadline - time.monotonic()
+            if delay <= 0:
+                deadline = time.monotonic() + frame
+                delay = frame
+            if self._wait(delay):
                 return True
         return True
 
@@ -1080,49 +1166,95 @@ class EffectEngine:
             self._speaker_com_initialized = False
         self.music_level = 0.0
 
-    def _reactive(self):
-        """Recommended default: dim idle, bright press, smooth release."""
-        m = str(self.mode)
+    @staticmethod
+    def _reactive_levels(mode, intensity):
+        m = str(mode)
         if m == "2":
-            base, active = self.intensity * 0.36, self.intensity
+            return intensity * 0.36, intensity
         elif m == "3":
-            base, active = self.intensity, self.intensity * 0.40
+            return intensity, intensity * 0.40
         elif m == "4":
-            base, active = 0, self.intensity * 0.55
+            return 0, intensity * 0.55
         elif m == "5":
-            base, active = 0, self.intensity
-        else:
-            base, active = self.intensity, 0
+            return 0, intensity
+        return intensity, 0
 
-        self._render_intensity(base)
-        self._keypress_event.clear()
-        self._keyrelease_event.clear()
+    @staticmethod
+    def _reactive_timings(speed):
+        speed_scale = math.sqrt(max(0.55, float(speed)))
+        return {
+            "pulse": max(0.14, min(0.32, 0.22 / speed_scale)),
+            "hold": max(0.12, min(0.26, 0.18 / speed_scale)),
+            "release": max(0.15, min(0.40, 0.30 / speed_scale)),
+        }
 
-        if self._keypress_event.wait(timeout=0.2):
-            self._render_intensity(active)
+    def _reactive(self):
+        """Continuously render idle/active levels so hold and pulse are distinct."""
+        frame = 1.0 / 96.0
+        seen_counter = 0
 
-            if str(self.hold_behavior) == "2":
-                if self._wait(0.075 / self.speed):
+        while self.running:
+            base, _active = self._reactive_levels(self.mode, self.intensity)
+            with self._keys_lock:
+                counter = self._keypress_counter
+
+            if counter == seen_counter:
+                self._render_intensity(base)
+                if self._wait(frame):
                     return True
+                continue
 
+            seen_counter = counter
+            timings = self._reactive_timings(self.speed)
+            activated_at = time.monotonic()
+            visible_until = activated_at + (
+                timings["hold"] if str(self.hold_behavior) == "2" else timings["pulse"]
+            )
+
+            while self.running:
+                _base, active = self._reactive_levels(self.mode, self.intensity)
+                self._render_intensity(active)
                 with self._keys_lock:
-                    keys_held = len(self._pressed_keys) > 0
+                    keys_held = bool(self._pressed_keys)
+                    newest_counter = self._keypress_counter
 
-                while keys_held and self.running:
-                    self._keyrelease_event.wait(timeout=0.2)
-                    with self._keys_lock:
-                        keys_held = len(self._pressed_keys) > 0
+                if newest_counter != seen_counter:
+                    seen_counter = newest_counter
+                    extension = timings["hold"] if str(self.hold_behavior) == "2" else timings["pulse"]
+                    visible_until = time.monotonic() + extension
 
-                self._keypress_event.clear()
-                self._keyrelease_event.clear()
-                if self._fade_to(base, 0.26 / self.speed, start=active):
+                if str(self.hold_behavior) == "2":
+                    finished = not keys_held and time.monotonic() >= visible_until
+                else:
+                    finished = time.monotonic() >= visible_until
+                if finished:
+                    break
+                if self._wait(frame):
                     return True
-            else:
-                if self._wait(0.11 / self.speed):
+
+            self._keypress_event.clear()
+            self._keyrelease_event.clear()
+            release_started = time.monotonic()
+            retrigger = False
+            while self.running:
+                base, active = self._reactive_levels(self.mode, self.intensity)
+                with self._keys_lock:
+                    newest_counter = self._keypress_counter
+                if newest_counter != seen_counter:
+                    seen_counter = newest_counter - 1
+                    retrigger = True
+                    break
+                progress = min(1.0, (time.monotonic() - release_started) / timings["release"])
+                eased = 0.5 - 0.5 * math.cos(math.pi * progress)
+                self._render_intensity(active + (base - active) * eased)
+                if progress >= 1.0:
+                    break
+                if self._wait(frame):
                     return True
-                self._keypress_event.clear()
-                if self._fade_to(base, 0.22 / self.speed, start=active):
-                    return True
+            if retrigger:
+                continue
+
+        return True
 
     def get_status(self):
         return {
@@ -1144,6 +1276,173 @@ class EffectEngine:
 controller = None
 engine = None
 window = None
+
+
+def apply_windows_backdrop(widget, dark=True):
+    """Request the native Windows 11 backdrop; custom glass remains the fallback."""
+    if os.name != "nt":
+        return False
+    try:
+        hwnd = wintypes.HWND(int(widget.winId()))
+        enabled = ctypes.c_int(1 if dark else 0)
+        # DWMWA_USE_IMMERSIVE_DARK_MODE and DWMWA_SYSTEMBACKDROP_TYPE.
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, 20, ctypes.byref(enabled), ctypes.sizeof(enabled)
+        )
+        backdrop = ctypes.c_int(2)  # DWMSBT_MAINWINDOW / Mica where supported.
+        result = ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, 38, ctypes.byref(backdrop), ctypes.sizeof(backdrop)
+        )
+        return result == 0
+    except Exception:
+        return False
+
+
+class GlassFrame(QFrame):
+    """Layered translucent surface with depth, tint, and specular glass edges."""
+
+    def __init__(self, surface="panel", parent=None):
+        super().__init__(parent)
+        self.surface = surface
+        self.setAttribute(Qt.WA_TranslucentBackground)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -2.5)
+        light = getattr(self.window(), "appearance_mode", "dark") == "light"
+        accent = QColor(getattr(self.window(), "active_accent", "#42c8ff"))
+        radius = 19 if self.surface in ("sidebar", "panel") else 16
+
+        shadow_rect = QRectF(rect).translated(0, 2.5)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(2, 7, 14, 42 if light else 92))
+        painter.drawRoundedRect(shadow_rect, radius, radius)
+
+        background = getattr(self.window(), "background", None)
+        blurred = getattr(background, "_blurred_scene", QPixmap())
+        if background is not None and not blurred.isNull():
+            origin = self.mapTo(background, self.rect().topLeft())
+            source = QRectF(origin.x(), origin.y(), self.width(), self.height())
+            clip = QPainterPath()
+            clip.addRoundedRect(rect, radius, radius)
+            painter.save()
+            painter.setClipPath(clip)
+            painter.setOpacity(0.76 if light else 0.62)
+            painter.drawPixmap(rect, blurred, source)
+            painter.restore()
+
+        glass = QLinearGradient(rect.topLeft(), rect.bottomRight())
+        if light:
+            glass.setColorAt(0.0, QColor(255, 255, 255, 155))
+            glass.setColorAt(0.42, QColor(242, 250, 255, 100))
+            tinted = QColor(accent)
+            tinted.setAlpha(34)
+            glass.setColorAt(1.0, tinted)
+        else:
+            glass.setColorAt(0.0, QColor(18, 31, 48, 130))
+            glass.setColorAt(0.48, QColor(5, 13, 25, 85))
+            tinted = QColor(accent)
+            tinted.setAlpha(24)
+            glass.setColorAt(1.0, tinted)
+        painter.setBrush(glass)
+        outer = QColor(accent)
+        outer.setAlpha(82 if light else 72)
+        painter.setPen(QPen(outer, 1.05))
+        painter.drawRoundedRect(rect, radius, radius)
+
+        inner = QRectF(rect).adjusted(1.4, 1.4, -1.4, -1.4)
+        highlight = QLinearGradient(inner.topLeft(), inner.topRight())
+        highlight.setColorAt(0.0, QColor(255, 255, 255, 178 if light else 92))
+        highlight.setColorAt(0.34, QColor(255, 255, 255, 48 if light else 24))
+        highlight.setColorAt(0.72, QColor(255, 255, 255, 8))
+        highlight.setColorAt(1.0, QColor(255, 255, 255, 94 if light else 36))
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(QBrush(highlight), 1.15))
+        painter.drawRoundedRect(inner, radius - 1.5, radius - 1.5)
+
+        sheen = QLinearGradient(rect.left(), rect.top(), rect.left(), rect.top() + max(18, rect.height() * 0.42))
+        sheen.setColorAt(0.0, QColor(255, 255, 255, 40 if light else 20))
+        sheen.setColorAt(1.0, QColor(255, 255, 255, 0))
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(sheen)
+        painter.drawRoundedRect(QRectF(rect.left() + 2, rect.top() + 2, rect.width() - 4,
+                                       min(rect.height() * 0.46, 62)), radius - 2, radius - 2)
+
+        grain = QColor(255, 255, 255, 14 if light else 9)
+        painter.setPen(QPen(grain, 1))
+        for index in range(18):
+            x = rect.left() + 12 + ((index * 47) % max(13, int(rect.width() - 24)))
+            y = rect.top() + 9 + ((index * 29) % max(11, int(rect.height() - 18)))
+            painter.drawPoint(QPointF(x, y))
+        painter.end()
+
+
+class ResponsiveTitle(QLabel):
+    """Keep the full product name visible by fitting its font to available width."""
+
+    def __init__(self, text, parent=None):
+        super().__init__(text, parent)
+        self.setObjectName("headerTitle")
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.setMinimumWidth(0)
+
+    def _fit_font(self):
+        available = max(120, self.contentsRect().width() - 2)
+        chosen = 24
+        while chosen > 15:
+            font = QFont("Segoe UI Variable Display", chosen, QFont.Bold)
+            if QFontMetrics(font).horizontalAdvance(self.text()) <= available:
+                break
+            chosen -= 1
+        if abs(self.font().pointSizeF() - chosen) > 0.1:
+            # A local rule outranks the application-wide QWidget font rule.
+            self.setStyleSheet(
+                f"font: 700 {chosen}pt 'Segoe UI Variable Display';"
+            )
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_font()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._fit_font()
+
+
+class ElidedLabel(QLabel):
+    """Preserve full accessible text while fitting long live status strings."""
+
+    def __init__(self, text="", parent=None, mode=Qt.ElideRight):
+        self._full_text = str(text)
+        self._elide_mode = mode
+        super().__init__("", parent)
+        self.setToolTip(self._full_text)
+        self._apply_elision()
+
+    def setText(self, text):
+        self._full_text = str(text)
+        self.setToolTip(self._full_text)
+        self._apply_elision()
+
+    def text(self):
+        return self._full_text
+
+    def _apply_elision(self):
+        available = max(1, self.contentsRect().width())
+        QLabel.setText(
+            self,
+            self.fontMetrics().elidedText(self._full_text, self._elide_mode, available),
+        )
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_elision()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() in (QEvent.FontChange, QEvent.StyleChange):
+            QTimer.singleShot(0, self._apply_elision)
 
 
 class EffectCard(QAbstractButton):
@@ -1172,7 +1471,7 @@ class EffectCard(QAbstractButton):
             selected_top = QColor(accent)
             selected_top.setAlpha(92 if light_mode else 88)
             selected_bottom = QColor("#ffffff" if light_mode else "#07131e")
-            selected_bottom.setAlpha(205 if light_mode else 235)
+            selected_bottom.setAlpha(156 if light_mode else 168)
             background.setColorAt(0.0, QColor("#4b1018") if god_mode else selected_top)
             background.setColorAt(1.0, QColor("#21090e") if god_mode else selected_bottom)
             border = QColor("#ff4d5f") if god_mode else accent
@@ -1180,21 +1479,34 @@ class EffectCard(QAbstractButton):
             desc_color = QColor("#7e2230" if light_mode and god_mode else "#45647b" if light_mode else "#ffc0c7" if god_mode else "#a9daf2")
             icon_color = QColor("#ff6575") if god_mode else accent
         elif self.underMouse():
-            background = QColor(255, 255, 255, 194) if light_mode else QColor(23, 36, 53, 194)
+            background = QColor(255, 255, 255, 154) if light_mode else QColor(23, 36, 53, 142)
             border = accent
             name_color = QColor("#152438" if light_mode else "#f3f8fc")
             desc_color = QColor("#526b7e" if light_mode else "#aebfd0")
             icon_color = accent
         else:
-            background = QColor(250, 253, 255, 165) if light_mode else QColor(8, 17, 29, 174)
+            background = QColor(250, 253, 255, 128) if light_mode else QColor(8, 17, 29, 105)
             border = QColor(55, 93, 120, 90) if light_mode else QColor(112, 164, 202, 90)
             name_color = QColor("#17283b" if light_mode else "#e8f0f7")
             desc_color = QColor("#5c7183" if light_mode else "#8fa3b8")
             icon_color = accent
 
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(0, 5, 12, 55 if light_mode else 105))
+        painter.drawRoundedRect(QRectF(rect).translated(0, 2), 14, 14)
         painter.setPen(QPen(border, 1.2))
         painter.setBrush(background)
         painter.drawRoundedRect(rect, 14, 14)
+
+        rim = QLinearGradient(rect.topLeft(), rect.topRight())
+        rim.setColorAt(0.0, QColor(255, 255, 255, 155 if light_mode else 72))
+        rim.setColorAt(0.55, QColor(255, 255, 255, 8))
+        rim_color = QColor(accent)
+        rim_color.setAlpha(96 if self.isChecked() else 30)
+        rim.setColorAt(1.0, rim_color)
+        painter.setPen(QPen(QBrush(rim), 1.0))
+        painter.drawLine(QPointF(rect.left() + 13, rect.top() + 1.4),
+                         QPointF(rect.right() - 13, rect.top() + 1.4))
 
         icon_rect = QRectF(rect.left() + 15, rect.top() + 13, 28, 42)
         painter.setFont(QFont("Segoe UI Symbol", 14, QFont.DemiBold))
@@ -1248,7 +1560,7 @@ class AnimatedBrand(QWidget):
 
 
 class AmbientBackground(QWidget):
-    """Animated, resolution-independent background drawn directly by Qt."""
+    """Cached animated scene plus a low-resolution frost map for glass panels."""
 
     def __init__(self):
         super().__init__()
@@ -1256,21 +1568,44 @@ class AmbientBackground(QWidget):
         self.appearance_mode = "dark"
         self.accent = QColor("#42c8ff")
         self._texture = QPixmap(resource_path(os.path.join("assets", "thrash-liquid-glass-v3.png")))
+        self._scaled_texture = QPixmap()
+        self._scene = QPixmap()
+        self._blurred_scene = QPixmap()
+        self._frame_index = 0
         self._started = time.monotonic()
         self._timer = QTimer(self)
-        self._timer.timeout.connect(self.update)
-        self._timer.start(40)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(66)
+
+    def _tick(self):
+        host = self.window()
+        if not host.isVisible() or host.isMinimized() or not getattr(host, "animations_enabled", True):
+            return
+        self.update()
+        for panel in self.findChildren(GlassFrame):
+            panel.update()
+
+    def _refresh_texture_cache(self):
+        if self._texture.isNull() or self.width() <= 0 or self.height() <= 0:
+            self._scaled_texture = QPixmap()
+            return
+        self._scaled_texture = self._texture.scaled(
+            self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
+        )
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._refresh_texture_cache()
+        self._blurred_scene = QPixmap()
 
     def set_appearance(self, mode, accent):
         self.appearance_mode = mode
         self.accent = QColor(accent)
+        self._blurred_scene = QPixmap()
         self.update()
 
-    def paintEvent(self, event):
-        painter = QPainter(self)
+    def _paint_scene(self, painter, width, height, phase):
         painter.setRenderHint(QPainter.Antialiasing)
-        width, height = self.width(), self.height()
-        phase = time.monotonic() - self._started
 
         base = QLinearGradient(0, 0, width, height)
         if self.appearance_mode == "light":
@@ -1281,16 +1616,13 @@ class AmbientBackground(QWidget):
             base.setColorAt(0.0, QColor("#05070d"))
             base.setColorAt(0.52, QColor("#0a101b"))
             base.setColorAt(1.0, QColor("#070a11"))
-        painter.fillRect(self.rect(), base)
+        painter.fillRect(QRectF(0, 0, width, height), base)
 
-        if not self._texture.isNull():
-            scaled = self._texture.scaled(
-                self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
-            )
-            source_x = max(0, (scaled.width() - width) // 2)
-            source_y = max(0, (scaled.height() - height) // 2)
+        if not self._scaled_texture.isNull():
+            source_x = max(0, (self._scaled_texture.width() - width) // 2)
+            source_y = max(0, (self._scaled_texture.height() - height) // 2)
             painter.setOpacity(0.20 if self.appearance_mode == "light" else 0.52)
-            painter.drawPixmap(0, 0, scaled, source_x, source_y, width, height)
+            painter.drawPixmap(0, 0, self._scaled_texture, source_x, source_y, width, height)
             painter.setOpacity(1.0)
 
         accent_glow = QColor(self.accent)
@@ -1306,7 +1638,7 @@ class AmbientBackground(QWidget):
             fade = QColor(color)
             fade.setAlpha(0)
             glow.setColorAt(1.0, fade)
-            painter.fillRect(self.rect(), glow)
+            painter.fillRect(QRectF(0, 0, width, height), glow)
 
         # A quiet keyboard-grid motif in the lower background.
         grid_color = QColor(self.accent)
@@ -1321,6 +1653,30 @@ class AmbientBackground(QWidget):
                               start_y + row * (key_h + gap), key_w, key_h)
                 painter.drawRoundedRect(rect, 4, 4)
 
+    def paintEvent(self, event):
+        width, height = self.width(), self.height()
+        if width <= 0 or height <= 0:
+            return
+        if self._scaled_texture.isNull():
+            self._refresh_texture_cache()
+        self._scene = QPixmap(self.size())
+        self._scene.fill(Qt.transparent)
+        scene_painter = QPainter(self._scene)
+        self._paint_scene(scene_painter, width, height, time.monotonic() - self._started)
+        scene_painter.end()
+
+        self._frame_index += 1
+        if self._blurred_scene.isNull() or self._frame_index % 3 == 0:
+            small = self._scene.scaled(
+                max(1, width // 9), max(1, height // 9),
+                Qt.IgnoreAspectRatio, Qt.SmoothTransformation,
+            )
+            self._blurred_scene = small.scaled(
+                self.size(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation
+            )
+
+        painter = QPainter(self)
+        painter.drawPixmap(0, 0, self._scene)
         painter.end()
 
 
@@ -1531,7 +1887,7 @@ class DesktopApplication(QMainWindow):
         status_layout.setContentsMargins(16, 12, 16, 12)
         self.connection_dot = QLabel("●")
         self.connection_dot.setObjectName("connectionDot")
-        self.method_label = QLabel("Detecting Lenovo lighting bridge…")
+        self.method_label = ElidedLabel("Detecting Lenovo lighting bridge…")
         self.state_label = QLabel("Ready")
         self.state_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         status_layout.addWidget(self.connection_dot)
@@ -1961,9 +2317,11 @@ class DesktopApplication(QMainWindow):
         text = "#17283b" if light else "#eaf1f7"
         title = "#102035" if light else "#fbfdff"
         muted = "#5b7083" if light else "#92a8bc"
-        panel = "rgba(250,253,255,164)" if light else "rgba(6,14,25,164)"
-        sidebar = "rgba(241,247,251,188)" if light else "rgba(3,8,15,184)"
-        status = "rgba(251,254,255,150)" if light else "rgba(7,15,27,150)"
+        group_gradient = (
+            "qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 rgba(255,255,255,154),stop:1 rgba(226,241,250,82))"
+            if light else
+            "qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 rgba(18,31,48,132),stop:1 rgba(3,10,21,76))"
+        )
         button = "rgba(245,250,253,176)" if light else "rgba(18,31,47,176)"
         hover = "rgba(255,255,255,220)" if light else "rgba(31,49,69,215)"
         border = "rgba(55,101,130,72)" if light else "rgba(130,184,220,76)"
@@ -1973,14 +2331,13 @@ class DesktopApplication(QMainWindow):
             QMainWindow {{ background: {'#e9f1f6' if light else '#05070c'}; }}
             QWidget {{ color: {text}; font: 9.5pt 'Segoe UI Variable Text'; }}
             QLabel {{ background: transparent; }}
+            QLabel#headerTitle {{ color: {title}; }}
             QLabel#title {{ font: 700 24pt 'Segoe UI Variable Display'; color: {title}; }}
             QLabel#pageTitle {{ font: 650 19pt 'Segoe UI Variable Display'; color: {title}; }}
             QLabel#section {{ color: {accent}; font: 650 8pt 'Segoe UI Variable Text'; }}
             QLabel#muted {{ color: {muted}; }}
-            QFrame#sidebar, QFrame#glass, QGroupBox {{ background: {panel};
-                border: 1px solid {border}; border-radius: 18px; }}
-            QFrame#sidebar {{ background: {sidebar}; }}
-            QFrame#status {{ background: {status}; border: 1px solid {border}; border-radius: 16px; }}
+            QFrame#sidebar, QFrame#glass, QFrame#status {{ background: transparent; border: 0; }}
+            QGroupBox {{ background: {group_gradient}; border: 1px solid {border}; border-radius: 18px; }}
             QPushButton {{ background: {button}; border: 1px solid {border};
                 border-radius: 11px; padding: 10px 15px; font: 600 9pt 'Segoe UI Variable Text'; }}
             QPushButton:hover {{ border-color: {accent}; background: {hover}; }}
@@ -1991,6 +2348,9 @@ class DesktopApplication(QMainWindow):
             QPushButton#power {{ min-width:44px; max-width:44px; min-height:44px; max-height:44px; padding:0;
                 border-radius:22px; font:700 17pt 'Segoe UI Symbol'; color:{muted}; }}
             QPushButton#power[powered='true'] {{ background:{accent}; color:#071018; border-color:{accent}; }}
+            QLabel#statusPill {{ background: rgba({accent_color.red()},{accent_color.green()},{accent_color.blue()},30);
+                border: 1px solid rgba({accent_color.red()},{accent_color.green()},{accent_color.blue()},72);
+                border-radius: 10px; padding: 5px 9px; font: 650 8pt 'Segoe UI Variable Text'; }}
             QCheckBox {{ spacing: 10px; padding: 6px; color: {text}; }}
             QCheckBox::indicator {{ width: 18px; height: 18px; border: 1px solid #71869a; border-radius: 6px; background: {button}; }}
             QCheckBox::indicator:checked {{ background: {accent}; border-color: {accent}; }}
@@ -2009,8 +2369,9 @@ class DesktopApplication(QMainWindow):
             self.background.set_appearance(self.appearance_mode, self.active_accent)
 
     def _make_sidebar(self):
-        sidebar = QFrame()
+        sidebar = GlassFrame("sidebar")
         sidebar.setObjectName("sidebar")
+        self.sidebar_panel = sidebar
         sidebar.setFixedWidth(206)
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(14, 20, 14, 18)
@@ -2040,35 +2401,67 @@ class DesktopApplication(QMainWindow):
         return sidebar
 
     def _make_header(self):
-        panel = QFrame()
+        panel = GlassFrame("header")
         panel.setObjectName("status")
-        row = QHBoxLayout(panel)
-        row.setContentsMargins(18, 13, 18, 13)
-        titles = QVBoxLayout()
-        title = QLabel("THRASH LIGHTENING CONTROL")
-        title.setObjectName("title")
-        subtitle = QLabel("Native white-backlight control  •  private and local")
-        subtitle.setObjectName("muted")
-        titles.addWidget(title)
-        titles.addWidget(subtitle)
-        self.connection_dot = QLabel("●")
-        self.connection_dot.setStyleSheet("color:#2dd4bf; font-size:15px;")
-        self.method_label = QLabel("Detecting Lenovo lighting bridge…")
-        self.state_label = QLabel("READY")
-        self.state_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        row.addLayout(titles, 1)
-        row.addWidget(self.connection_dot)
-        row.addWidget(self.method_label)
-        row.addSpacing(16)
-        row.addWidget(self.state_label)
-        row.addSpacing(10)
+        self.header_panel = panel
+        panel.setMinimumHeight(106)
+        column = QVBoxLayout(panel)
+        column.setContentsMargins(20, 13, 16, 12)
+        column.setSpacing(5)
+
+        title_row = QWidget(panel)
+        title_row.setAttribute(Qt.WA_TranslucentBackground)
+        top = QHBoxLayout(title_row)
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(12)
+        identity = QVBoxLayout()
+        identity.setContentsMargins(0, 0, 0, 0)
+        identity.setSpacing(1)
+        self.header_title = ResponsiveTitle("THRASH LIGHTENING CONTROL")
+        identity.addWidget(self.header_title)
+        self.header_subtitle = QLabel("Native white-backlight control  •  private and local")
+        self.header_subtitle.setObjectName("muted")
+        self.header_subtitle.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.header_subtitle.setMinimumWidth(0)
+        identity.addWidget(self.header_subtitle)
+        top.addLayout(identity, 1)
         self.power_button = QPushButton("⏻")
         self.power_button.setObjectName("power")
         self.power_button.setProperty("powered", False)
         self.power_button.setToolTip("Turn the selected lighting effect on or off")
         self.power_button.setAccessibleName("Lighting power")
         self.power_button.clicked.connect(self.toggle_power)
-        row.addWidget(self.power_button)
+        top.addWidget(self.power_button, 0, Qt.AlignTop)
+        column.addWidget(title_row)
+
+        status_row = QWidget(panel)
+        status_row.setAttribute(Qt.WA_TranslucentBackground)
+        status = QHBoxLayout(status_row)
+        status.setContentsMargins(0, 0, 0, 0)
+        status.setSpacing(9)
+        self.header_status_cluster = QWidget(status_row)
+        self.header_status_cluster.setAttribute(Qt.WA_TranslucentBackground)
+        self.header_status_cluster.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        cluster = QHBoxLayout(self.header_status_cluster)
+        cluster.setContentsMargins(0, 0, 0, 0)
+        cluster.setSpacing(9)
+        self.connection_dot = QLabel("●")
+        self.connection_dot.setStyleSheet("color:#2dd4bf; font-size:15px;")
+        self.method_label = QLabel("Detecting Lenovo lighting bridge…")
+        self.method_label.setMinimumWidth(0)
+        self.method_label.setMaximumWidth(310)
+        self.method_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.state_label = ElidedLabel("READY")
+        self.state_label.setObjectName("statusPill")
+        self.state_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.state_label.setMinimumWidth(150)
+        self.state_label.setMaximumWidth(330)
+        cluster.addWidget(self.connection_dot)
+        cluster.addWidget(self.method_label, 1)
+        cluster.addStretch()
+        cluster.addWidget(self.state_label)
+        status.addWidget(self.header_status_cluster, 1)
+        column.addWidget(status_row)
         return panel
 
     def _scroll_page(self, content):
@@ -2087,6 +2480,8 @@ class DesktopApplication(QMainWindow):
         heading.setObjectName("pageTitle")
         note = QLabel(subtitle)
         note.setObjectName("muted")
+        note.setWordWrap(True)
+        note.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         layout.addWidget(heading)
         layout.addWidget(note)
         return page, layout
@@ -2111,6 +2506,8 @@ class DesktopApplication(QMainWindow):
         layout.addWidget(self._card_grid(self.LIGHTING_IDS, 3))
         self.battery_note = QLabel("BATTERY SAVER  •  softly wakes to your chosen intensity  •  sleeps after 30 seconds")
         self.battery_note.setObjectName("muted")
+        self.battery_note.setWordWrap(True)
+        self.battery_note.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         layout.addWidget(self.battery_note)
         self.advanced_panel = QGroupBox("GOD MODE  /  ADVANCED TIMING")
         advanced = QVBoxLayout(self.advanced_panel)
@@ -2127,18 +2524,20 @@ class DesktopApplication(QMainWindow):
         advanced.addWidget(self.speed_slider)
         self.reactive_options = QGroupBox("REACTIVE LAB")
         react_layout = QVBoxLayout(self.reactive_options)
-        reaction_row = QHBoxLayout()
-        for value, text_value in [(1, "On → Off"), (2, "Dim → Bright"), (3, "Bright → Dim"), (4, "Off → Dim"), (5, "Off → Bright")]:
+        reaction_row = QGridLayout()
+        for index, (value, text_value) in enumerate([(1, "On → Off"), (2, "Dim → Bright"), (3, "Bright → Dim"), (4, "Off → Dim"), (5, "Off → Bright")]):
             option = QRadioButton(text_value)
             self.react_buttons.addButton(option, value)
-            reaction_row.addWidget(option)
+            option.clicked.connect(self._reactive_options_changed)
+            reaction_row.addWidget(option, index // 3, index % 3)
             if value == 2:
                 option.setChecked(True)
         react_layout.addLayout(reaction_row)
         hold_row = QHBoxLayout()
-        for value, text_value in [(1, "Pulse once"), (2, "Stay bright while held")]:
+        for value, text_value in [(1, "Single timed pulse"), (2, "Hold until every key is released")]:
             option = QRadioButton(text_value)
             self.hold_buttons.addButton(option, value)
+            option.clicked.connect(self._reactive_options_changed)
             hold_row.addWidget(option)
             if value == 2:
                 option.setChecked(True)
@@ -2153,11 +2552,13 @@ class DesktopApplication(QMainWindow):
     def _audio_page(self):
         page, layout = self._page("AUDIO REACTIVE", "Two local audio paths: microphone energy or Windows speaker beats.")
         layout.addWidget(self._card_grid(self.AUDIO_IDS, 2))
-        audio = QFrame()
+        audio = GlassFrame("panel")
         audio.setObjectName("glass")
         audio_layout = QVBoxLayout(audio)
         self.audio_source_label = QLabel("SPEAKER MODE listens to Windows output—not the microphone.")
         self.audio_source_label.setObjectName("muted")
+        self.audio_source_label.setWordWrap(True)
+        self.audio_source_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.music_meter = QProgressBar()
         self.music_meter.setRange(0, 100)
         self.music_meter.setTextVisible(False)
@@ -2169,7 +2570,7 @@ class DesktopApplication(QMainWindow):
 
     def _device_page(self):
         page, layout = self._page("DEVICE", "Capability-first detection for Lenovo LOQ white-backlit keyboards.")
-        panel = QFrame()
+        panel = GlassFrame("panel")
         panel.setObjectName("glass")
         info = QGridLayout(panel)
         self.device_values = {}
@@ -2178,6 +2579,8 @@ class DesktopApplication(QMainWindow):
             label.setObjectName("section")
             value = QLabel("Detecting…")
             value.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            value.setWordWrap(True)
+            value.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             self.device_values[key] = value
             info.addWidget(label, row, 0)
             info.addWidget(value, row, 1)
@@ -2221,7 +2624,7 @@ class DesktopApplication(QMainWindow):
         accent_row.addStretch()
         appearance_layout.addLayout(accent_row)
         layout.addWidget(appearance)
-        panel = QFrame()
+        panel = GlassFrame("panel")
         panel.setObjectName("glass")
         settings_layout = QVBoxLayout(panel)
         self.startup_checkbox = QCheckBox("RUN AT WINDOWS STARTUP (VISIBLE IN TASK MANAGER)")
@@ -2240,6 +2643,8 @@ class DesktopApplication(QMainWindow):
             settings_layout.addWidget(widget)
         warning = QLabel("God Mode changes lighting timing only. It does not overclock the CPU, GPU, or keyboard hardware.")
         warning.setObjectName("muted")
+        warning.setWordWrap(True)
+        warning.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         settings_layout.addWidget(warning)
         layout.addWidget(panel)
         self.god_settings = QGroupBox("GOD MODE  /  BATTERY SAVER LAB")
@@ -2265,7 +2670,7 @@ class DesktopApplication(QMainWindow):
 
     def _about_page(self):
         page, layout = self._page("ABOUT", f"{APP_NAME}  •  Version {APP_VERSION}")
-        panel = QFrame()
+        panel = GlassFrame("panel")
         panel.setObjectName("glass")
         box = QVBoxLayout(panel)
         title = QLabel("T//  THRASH LIGHTENING CONTROL")
@@ -2278,6 +2683,7 @@ class DesktopApplication(QMainWindow):
         )
         body.setWordWrap(True)
         body.setObjectName("muted")
+        body.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         credits = QLabel("© 2026 THRASH. OPEN-SOURCE COMMUNITY SOFTWARE.")
         credits.setObjectName("section")
         box.addWidget(title)
@@ -2289,8 +2695,9 @@ class DesktopApplication(QMainWindow):
         return page
 
     def _make_action_bar(self):
-        panel = QFrame()
+        panel = GlassFrame("bar")
         panel.setObjectName("glass")
+        self.action_panel = panel
         row = QHBoxLayout(panel)
         row.setContentsMargins(15, 11, 15, 11)
         row.addWidget(QLabel("INTENSITY"))
@@ -2304,6 +2711,7 @@ class DesktopApplication(QMainWindow):
         row.addWidget(self.intensity_value)
         hint = QLabel("SELECT AN EFFECT TO APPLY IT INSTANTLY")
         hint.setObjectName("muted")
+        hint.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         row.addSpacing(16)
         row.addWidget(hint)
         return panel
@@ -2343,6 +2751,13 @@ class DesktopApplication(QMainWindow):
 
     def _effect_changed(self, _checked=False):
         effect = self.selected_effect()
+        low, high = EffectEngine.SPEED_LIMITS.get(effect, (0.20, 4.00))
+        effective = EffectEngine.clamp_speed(effect, self.speed_slider.value() / 10.0)
+        self.speed_slider.blockSignals(True)
+        self.speed_slider.setRange(int(round(low * 10)), int(round(high * 10)))
+        self.speed_slider.setValue(int(round(effective * 10)))
+        self.speed_slider.blockSignals(False)
+        self.speed_label.setText(f"{effective:.1f}×")
         self.reactive_options.setVisible(self.god_mode and effect == "reactive")
         self.advanced_panel.setVisible(self.god_mode)
         self.audio_source_label.setText(
@@ -2354,9 +2769,16 @@ class DesktopApplication(QMainWindow):
             self.start_effect()
 
     def _speed_changed(self, value):
-        self.speed_label.setText(f"{value / 10:.1f}×")
+        effective = EffectEngine.clamp_speed(self.selected_effect(), value / 10.0)
+        self.speed_label.setText(f"{effective:.1f}×")
         if self.god_mode and self.engine.running:
-            self.engine.speed = value / 10
+            self.engine.speed = effective
+
+    def _reactive_options_changed(self):
+        """Apply God Mode reaction choices immediately without restarting power."""
+        if self.engine.running and self.engine.current_effect == "reactive":
+            self.engine.mode = self.react_buttons.checkedId()
+            self.engine.hold_behavior = self.hold_buttons.checkedId()
 
     def _intensity_changed(self, value):
         self.intensity = value
@@ -2387,6 +2809,16 @@ class DesktopApplication(QMainWindow):
         self.god_badge.setVisible(self.god_mode)
         if hasattr(self, "reactive_options"):
             self.reactive_options.setVisible(self.god_mode and self.selected_effect() == "reactive")
+        if not self.god_mode and hasattr(self, "speed_slider"):
+            effect = self.selected_effect()
+            recommended = EffectEngine.RECOMMENDED_SPEEDS.get(effect, 1.0)
+            effective = EffectEngine.clamp_speed(effect, recommended)
+            self.speed_slider.blockSignals(True)
+            self.speed_slider.setValue(int(round(effective * 10)))
+            self.speed_slider.blockSignals(False)
+            self.speed_label.setText(f"{effective:.1f}×")
+            if self.engine.running:
+                self.engine.speed = effective
         if repaint:
             self._set_theme()
             for card in self.cards.values():
@@ -2399,6 +2831,24 @@ class DesktopApplication(QMainWindow):
     def _set_animations(self, enabled):
         self.animations_enabled = bool(enabled)
         self.settings.setValue("animations", self.animations_enabled)
+        self._sync_animation_timers()
+        if hasattr(self, "animated_brand"):
+            self.animated_brand.update()
+        if hasattr(self, "background"):
+            self.background.update()
+
+    def _sync_animation_timers(self):
+        active = self.animations_enabled and self.isVisible() and not self.isMinimized()
+        if hasattr(self, "animated_brand"):
+            if active:
+                self.animated_brand._timer.start(33)
+            else:
+                self.animated_brand._timer.stop()
+        if hasattr(self, "background"):
+            if active:
+                self.background._timer.start(66)
+            else:
+                self.background._timer.stop()
 
     def _appearance_changed(self, checked):
         if not checked:
@@ -2420,8 +2870,12 @@ class DesktopApplication(QMainWindow):
         self._set_theme()
         for card in self.cards.values():
             card.update()
+        for panel in self.findChildren(GlassFrame):
+            panel.update()
         if hasattr(self, "animated_brand"):
             self.animated_brand.update()
+        if self.isVisible():
+            apply_windows_backdrop(self, self.appearance_mode == "dark")
 
     def _reset_defaults(self):
         self.god_checkbox.setChecked(False)
@@ -2567,6 +3021,8 @@ class DesktopApplication(QMainWindow):
 
     def showEvent(self, event):
         super().showEvent(event)
+        apply_windows_backdrop(self, self.appearance_mode == "dark")
+        self._sync_animation_timers()
         if not self._has_animated and self.animations_enabled:
             self._has_animated = True
             self.setWindowOpacity(0.0)
@@ -2582,12 +3038,18 @@ class DesktopApplication(QMainWindow):
         if hasattr(self, "god_overlay"):
             self.god_overlay.setGeometry(self.centralWidget().rect())
 
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.WindowStateChange:
+            QTimer.singleShot(0, self._sync_animation_timers)
+
     def _tray_activated(self, reason):
         if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
             self._restore_from_tray()
 
     def _restore_from_tray(self):
         self.showNormal()
+        self._sync_animation_timers()
         self.raise_()
         self.activateWindow()
 
@@ -2603,6 +3065,7 @@ class DesktopApplication(QMainWindow):
         if not self._quitting and self.close_to_tray and QSystemTrayIcon.isSystemTrayAvailable():
             event.ignore()
             self.hide()
+            self._sync_animation_timers()
             if not self._tray_notice_shown:
                 self._tray_notice_shown = True
                 self.tray_icon.showMessage("Still running", "Lighting control continues in the system tray.", QSystemTrayIcon.Information, 3200)

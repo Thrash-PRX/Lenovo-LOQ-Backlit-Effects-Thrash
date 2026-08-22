@@ -4,9 +4,12 @@ The God Mode release: a rebuilt lighting engine inside an original liquid-glass 
 
 ## Highlights
 
-- Stable 96 Hz Breathe renderer with a slower, soft-shouldered curve
+- Stable 96 Hz Breathe renderer with a slower symmetric curve and hardware-safe speed ceiling
+- Visibly distinct Wave with a sharp crest, long tail, secondary ripple, and dark reset
+- Reactive now distinguishes a timed pulse from true hold-until-last-key-release behavior
+- Physical multi-key tracking prevents auto-repeat and early-release glitches
 - One-click effect switching and persistent top-right master power
-- Animated Thrash wordmark, transparent glass surfaces, Light/Dark modes, and four accent themes
+- Animated Thrash wordmark, live background-blurred glass surfaces, Light/Dark modes, and four accent themes
 - Battery Saver starts dark at boot, breathes up on the first key, and sleeps after 30 seconds idle
 - Clean normal mode with automatically tuned speeds and one recommended Reactive behavior
 - God Mode reveals advanced timing, alternate Reactive behavior, and adjustable idle timeout
@@ -15,6 +18,7 @@ The God Mode release: a rebuilt lighting engine inside an original liquid-glass 
 - Speaker-output beat transients remain separate from microphone response
 - Capability-first detection for compatible Lenovo LOQ white-backlit keyboards
 - Tray persistence and Task Manager-visible Windows startup behavior
+- Responsive title, cards, descriptions, and status layout down to the 1040 px minimum width
 
 ## Release assets
 
@@ -23,7 +27,7 @@ The God Mode release: a rebuilt lighting engine inside an original liquid-glass 
 
 ## Hardware reality
 
-Compatible keyboards expose only Off, Dim, and Bright. The app creates intermediate-looking intensity and smoother transitions by rapidly blending those native states. A single-zone keyboard cannot produce a spatial left-to-right wave.
+Compatible keyboards expose only Off, Dim, and Bright. The app approximates intermediate-looking intensity and smoother transitions by rapidly blending those native states. This is still constrained by Lenovo's three-level interface and cannot equal a hardware-native PWM animation. A single-zone keyboard also cannot produce a spatial left-to-right wave, so this release's Wave is intentionally a temporal surge-and-ripple pattern.
 
 Fn+Space is the Lenovo keyboard-light shortcut. Fn+Q controls performance/thermal mode and is left untouched.
 

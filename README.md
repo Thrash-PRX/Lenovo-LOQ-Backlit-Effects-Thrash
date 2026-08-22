@@ -16,17 +16,17 @@
 
 The app controls the keyboard's global white backlight through Lenovo Vantage's installed `IdeaNotebookAddin` interface. It is a real native desktop application: no localhost page, browser server, telemetry, cloud account, or audio upload.
 
-- Original Legion Space-inspired navigation with transparent liquid-glass panels, animated Thrash branding, and a textured background
+- Original Legion Space-inspired navigation with live background-blurred liquid-glass panels, animated Thrash branding, and a textured background
 - Dark and Light modes with Ion, Nova, Solar, and Matrix accent themes
 - Battery Saver that starts dark at Windows sign-in, breathes up on the first key, and sleeps after 30 idle seconds
-- Rebuilt 96 Hz Breathe renderer with a slower soft-shouldered curve and 1–100 perceived intensity control
+- Rebuilt 96 Hz Breathe renderer with a slower symmetric curve, protected speed range, and 1–100 perceived intensity control
 - One-click effect switching with a persistent master power control in the top-right corner
-- Streamlined Reactive mode with tuned timing automatically selected
+- Streamlined Reactive mode with true key-hold tracking, a timed single-pulse alternative in God Mode, and tuned default timing
 - Separate Music / Mic and Music / Speaker modes; Speaker uses Windows output and adaptive beat-onset detection
 - Optional God Mode that reveals speed, reactive variants, and the Battery Saver timeout after a red unlock animation
 - System-tray operation, Task Manager-visible startup entry, diagnostics, privacy information, and clean uninstall
 
-The keyboard hardware exposes only Off, Dim, and Bright. Intermediate intensities and smoother fades are created with fast pulse-density blending. Results can vary slightly by keyboard firmware.
+The keyboard hardware exposes only Off, Dim, and Bright. Intermediate intensities and smoother fades are approximated with fast pulse-density blending. This is the smoothest transition the exposed Lenovo interface permits, but it cannot become the same hardware-native PWM animation available on keyboards with a dedicated lighting controller.
 
 ## Requirements
 
@@ -64,17 +64,17 @@ The release is Authenticode-signed with a self-signed `CN=Thrash` certificate. W
 | Mode | Behavior |
 | --- | --- |
 | Battery Saver | Soft wake to the selected intensity; off after 30 seconds idle |
-| Breathe | Slow soft-shouldered breathing at a stable 96 Hz render cadence |
+| Breathe | Slow symmetric breathing at a stable 96 Hz render cadence |
 | Heartbeat | Double-pulse rhythm |
 | Disco | Random high-energy pattern |
 | Pulse | Fast rise and controlled fade |
 | Binary Clock | Encodes the current seconds in six pulses |
-| Wave | Asymmetric rolling brightness crest for a single-zone keyboard |
-| Reactive | Dim idle, bright keypress, smooth release; stays active while held |
+| Wave | Fast surge, held crest, long tail, and a smaller secondary ripple |
+| Reactive | Dim idle, bright keypress, smooth release; accurately follows multiple held keys |
 | Music / Mic | Follows energy from the default microphone locally |
 | Music / Speaker | Reacts to beat-like transients from Windows speaker output, not the microphone |
 
-Blink, Strobe, SOS, Lightning, and Candle were removed in v3.1.1 to keep the standard experience focused. Speed and alternate Reactive behaviors are hidden unless God Mode is enabled.
+Blink, Strobe, SOS, Lightning, and Candle were removed in v3.1.1 to keep the standard experience focused. Speed and alternate Reactive behaviors are hidden unless God Mode is enabled. In Reactive Lab, **Single timed pulse** ends on its timer, while **Hold until every key is released** remains active until the last physical key is released.
 
 ## Battery Saver, startup, and tray
 

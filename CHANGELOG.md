@@ -18,7 +18,14 @@ All notable user-facing changes are documented here.
 
 ### Changed
 
-- Rebuilt Breathe with a stable 96 Hz scheduler and slower soft-shouldered curve instead of step-like delays
+- Rebuilt Breathe with a stable 96 Hz scheduler, symmetric perceptual curve, protected speed range, and dropped-frame recovery instead of step-like delays
+- Redesigned Wave as a clearly different fast crest, long tail, secondary ripple, and dark reset
+- Rebuilt Reactive as a continuous state machine with true timed-pulse and hold-until-last-key-release behavior
+- Tracked physical scan-code identities so auto-repeat and simultaneous keys cannot cause false releases
+- Applied Reactive Lab choices and intensity changes live without an off/on cycle
+- Reworked the header into responsive identity and status rows so the full title remains visible at 1040 px
+- Added cached background blur, specular rims, rounded refraction clipping, native Windows backdrop requests, and lighter glass tinting
+- Made all lighting-page descriptions and God Mode choices responsive at the minimum window size
 - Made every effect card start and switch modes immediately with one click
 - Renamed the product to Thrash Lightening Control
 - Streamlined normal Reactive behavior to dim idle, brighten on input, fade on release, and stay active while held
@@ -27,6 +34,13 @@ All notable user-facing changes are documented here.
 - Hid all speed and alternate reactive options unless God Mode is enabled
 - Corrected Lenovo lighting shortcut guidance to Fn+Space; Fn+Q remains the thermal-mode shortcut
 - Updated application, executable, and installer metadata to 3.1.1
+
+### Fixed
+
+- Prevented high God Mode speeds from turning Breathe, Wave, or Reactive into flashing
+- Prevented a keypress during Reactive release from waiting behind a blocking fade
+- Hardened Windows keyboard-hook startup, shutdown, failure cleanup, and rapid effect switching
+- Elided long bridge/status text without losing its full tooltip value
 
 ### Removed
 
