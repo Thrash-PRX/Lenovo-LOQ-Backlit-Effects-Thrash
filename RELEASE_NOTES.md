@@ -1,10 +1,12 @@
-# Lenovo LOQ Backlit Effects - Thrash v3.1.1
+# Thrash Lightening Control v3.1.1
 
 The God Mode release: a rebuilt lighting engine inside an original liquid-glass Windows interface.
 
 ## Highlights
 
-- Fluid 60 Hz Breathe curve with perceived 1–100 intensity
+- Stable 96 Hz Breathe renderer with a slower, soft-shouldered curve
+- One-click effect switching and persistent top-right master power
+- Animated Thrash wordmark, transparent glass surfaces, Light/Dark modes, and four accent themes
 - Battery Saver starts dark at boot, breathes up on the first key, and sleeps after 30 seconds idle
 - Clean normal mode with automatically tuned speeds and one recommended Reactive behavior
 - God Mode reveals advanced timing, alternate Reactive behavior, and adjustable idle timeout
@@ -16,7 +18,7 @@ The God Mode release: a rebuilt lighting engine inside an original liquid-glass 
 
 ## Release assets
 
-- `LenovoLOQBacklitEffects-Thrash-Setup-v3.1.1.exe` — signed compressed Windows installer
+- `ThrashLighteningControl-Setup-v3.1.1.exe` — signed compressed Windows installer
 - `SHA256SUMS.txt` — installer integrity checksum
 
 ## Hardware reality

@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="assets/app-icon.png" width="128" alt="Lenovo LOQ Backlit Effects icon">
+  <img src="assets/app-icon.png" width="128" alt="Thrash Lightening Control icon">
 </p>
 
-<h1 align="center">Lenovo LOQ Backlit Effects - Thrash</h1>
+<h1 align="center">Thrash Lightening Control</h1>
 
 <p align="center">A native Windows lighting lab for compatible Lenovo LOQ white-backlit keyboards.</p>
 
@@ -16,9 +16,11 @@
 
 The app controls the keyboard's global white backlight through Lenovo Vantage's installed `IdeaNotebookAddin` interface. It is a real native desktop application: no localhost page, browser server, telemetry, cloud account, or audio upload.
 
-- Original Legion Space-inspired navigation with liquid-glass depth and a Thrash background
+- Original Legion Space-inspired navigation with transparent liquid-glass panels, animated Thrash branding, and a textured background
+- Dark and Light modes with Ion, Nova, Solar, and Matrix accent themes
 - Battery Saver that starts dark at Windows sign-in, breathes up on the first key, and sleeps after 30 idle seconds
-- Fluid 60 Hz Breathe curve and 1–100 perceived intensity control
+- Rebuilt 96 Hz Breathe renderer with a slower soft-shouldered curve and 1–100 perceived intensity control
+- One-click effect switching with a persistent master power control in the top-right corner
 - Streamlined Reactive mode with tuned timing automatically selected
 - Separate Music / Mic and Music / Speaker modes; Speaker uses Windows output and adaptive beat-onset detection
 - Optional God Mode that reveals speed, reactive variants, and the Battery Saver timeout after a red unlock animation
@@ -38,7 +40,7 @@ Compatibility is detected from Lenovo Vantage's backlight capability rather than
 ## Download and install
 
 1. Open the repository's [Releases](../../releases) page.
-2. Download `LenovoLOQBacklitEffects-Thrash-Setup-v3.1.1.exe` and `SHA256SUMS.txt`.
+2. Download `ThrashLighteningControl-Setup-v3.1.1.exe` and `SHA256SUMS.txt`.
 3. If Chrome, Edge, or another browser blocks the installer, open the browser's **Downloads** page (`Ctrl+J`), locate the blocked file, and choose **Keep**, **Allow download**, or **Download unsafe file**. Only allow it when it came from this repository.
 4. Verify the installer's SHA-256 value against `SHA256SUMS.txt`.
 5. Run the installer and accept the Windows administrator prompt.
@@ -50,8 +52,8 @@ The release is Authenticode-signed with a self-signed `CN=Thrash` certificate. W
 ## How to use
 
 1. Open the app and confirm the header says **Lenovo bridge online**.
-2. Choose a mode under **Lighting** or **Audio Reactive**.
-3. Choose the desired **Intensity** from 1–100 and select **Start Mode**.
+2. Click a mode under **Lighting** or **Audio Reactive**. It starts immediately, and clicking another mode switches without an off/on cycle.
+3. Choose the desired **Intensity** from 1–100. Use the top-right power button to turn the selected mode off or back on.
 4. Leave God Mode off for curated automatic timing. Enable it in **Settings** only when you want advanced speed, reactive, or idle-timeout controls.
 5. Closing the window keeps the app in the notification area by default. Use the tray menu's **Quit** command to exit fully.
 
@@ -62,7 +64,7 @@ The release is Authenticode-signed with a self-signed `CN=Thrash` certificate. W
 | Mode | Behavior |
 | --- | --- |
 | Battery Saver | Soft wake to the selected intensity; off after 30 seconds idle |
-| Breathe | Continuous sine-eased breathing with temporal intensity blending |
+| Breathe | Slow soft-shouldered breathing at a stable 96 Hz render cadence |
 | Heartbeat | Double-pulse rhythm |
 | Disco | Random high-energy pattern |
 | Pulse | Fast rise and controlled fade |
@@ -78,7 +80,7 @@ Blink, Strobe, SOS, Lightning, and Candle were removed in v3.1.1 to keep the sta
 
 When launched by Windows startup, the keyboard begins off. Battery Saver runs quietly in the tray and the first keypress breathes the light up to the user's remembered 1–100 intensity. After 30 seconds without keyboard input, it fades out again. The timeout can be changed only in God Mode.
 
-**Run at Windows Startup** creates a current-user Startup apps entry and an elevated on-demand scheduled task named `Lenovo LOQ Backlit Effects - Thrash`. This avoids leaving a visible console window and lets the entry appear in Task Manager. Turning the option off removes both entries. No Windows service is installed.
+**Run at Windows Startup** creates a current-user Startup apps entry and an elevated on-demand scheduled task named `Thrash Lightening Control`. This avoids leaving a visible console window and lets the entry appear in Task Manager. Turning the option off removes both entries. No Windows service is installed.
 
 ## Audio privacy
 

@@ -13,10 +13,14 @@ All notable user-facing changes are documented here.
 - Capability-first support for additional Lenovo LOQ white-backlit models
 - Device diagnostics, privacy, compatibility, credits, and expanded settings pages
 - Generated Thrash liquid-glass background artwork
+- Animated Thrash wordmark, Light/Dark appearance modes, and four accent themes
+- Persistent top-right master power control
 
 ### Changed
 
-- Rebuilt Breathe with a continuous sine-eased curve instead of step-like delays
+- Rebuilt Breathe with a stable 96 Hz scheduler and slower soft-shouldered curve instead of step-like delays
+- Made every effect card start and switch modes immediately with one click
+- Renamed the product to Thrash Lightening Control
 - Streamlined normal Reactive behavior to dim idle, brighten on input, fade on release, and stay active while held
 - Improved speaker-output beat tracking while keeping microphone and speaker paths separate
 - Renamed Default Backlight to Battery Saver and preserved the selected intensity on wake

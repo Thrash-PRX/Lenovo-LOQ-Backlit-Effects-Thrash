@@ -14,6 +14,8 @@ class DummyController:
 
     def __init__(self):
         self.shutdown_calls = 0
+        self.current_level = 0
+        self.max_level = 2
 
     def get_status(self):
         return {
@@ -24,6 +26,10 @@ class DummyController:
 
     def shutdown(self):
         self.shutdown_calls += 1
+
+    def set_brightness(self, level):
+        self.current_level = level
+        return True
 
 
 class DummyEngine:
@@ -43,8 +49,9 @@ class DummyEngine:
         self.current_effect = effect
         self.start_calls.append((effect, kwargs))
 
-    def stop(self):
+    def stop(self, restore=True):
         self.stop_calls += 1
+        self.running = False
 
 
 class DesktopShellTests(unittest.TestCase):
@@ -108,6 +115,27 @@ class DesktopShellTests(unittest.TestCase):
         self.assertEqual(controller.levels[-1], 0)
         self.assertEqual(engine.start_calls[-1][0], "battery_saver")
         self.assertTrue(engine.start_calls[-1][1]["start_asleep"])
+        window._quit_application()
+
+    def test_effect_cards_switch_immediately_with_one_click(self):
+        engine = DummyEngine()
+        window = app.DesktopApplication(DummyController(), engine)
+        window.cards["breathe"].click()
+        self.assertEqual(engine.start_calls[-1][0], "breathe")
+        window.cards["wave"].click()
+        self.assertEqual(engine.start_calls[-1][0], "wave")
+        self.assertTrue(window.power_button.property("powered"))
+        window._quit_application()
+
+    def test_top_right_power_turns_keyboard_fully_off(self):
+        controller = DummyController()
+        engine = DummyEngine()
+        window = app.DesktopApplication(controller, engine)
+        window.cards["breathe"].click()
+        window.toggle_power()
+        self.assertFalse(engine.running)
+        self.assertEqual(controller.current_level, 0)
+        self.assertFalse(window.power_button.property("powered"))
         window._quit_application()
 
 

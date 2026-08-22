@@ -54,6 +54,15 @@ class EffectEngineV3Tests(unittest.TestCase):
         engine = app.EffectEngine(RecordingController())
         self.assertEqual(engine.idle_timeout, 30.0)
 
+    def test_breathe_curve_has_soft_symmetric_shoulders(self):
+        samples = [app.EffectEngine._breathe_envelope(i / 100) for i in range(101)]
+        self.assertAlmostEqual(samples[0], 0.0)
+        self.assertAlmostEqual(samples[50], 1.0)
+        self.assertAlmostEqual(samples[-1], 0.0, places=8)
+        self.assertTrue(all(a <= b for a, b in zip(samples[:50], samples[1:51])))
+        self.assertTrue(all(a >= b for a, b in zip(samples[50:100], samples[51:])))
+        self.assertLess(max(abs(b - a) for a, b in zip(samples, samples[1:])), 0.04)
+
 
 if __name__ == "__main__":
     unittest.main()

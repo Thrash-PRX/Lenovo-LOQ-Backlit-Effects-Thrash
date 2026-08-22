@@ -3,7 +3,7 @@ setlocal
 cd /d "%~dp0"
 
 echo ================================================
-echo   Lenovo LOQ Keyboard Effects - EXE Builder
+echo   Thrash Lightening Control - EXE Builder
 echo ================================================
 echo.
 
@@ -42,9 +42,9 @@ echo   BUILD COMPLETE
 echo ================================================
 echo.
 echo EXE:
-echo   dist\LenovoLOQBacklitEffects-Thrash.exe
+echo   dist\ThrashLighteningControl.exe
 echo.
-echo Double-click LenovoLOQBacklitEffects-Thrash.exe and accept the Administrator prompt.
+echo Double-click ThrashLighteningControl.exe and accept the Administrator prompt.
 echo The native desktop window will open automatically.
 echo.
 pause

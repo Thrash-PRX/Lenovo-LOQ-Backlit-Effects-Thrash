@@ -97,8 +97,9 @@ def resource_path(relative_path):
 
 
 APP_VERSION = "3.1.1"
-STARTUP_TASK_NAME = "Lenovo LOQ Backlit Effects - Thrash"
-STARTUP_RUN_VALUE = "Lenovo LOQ Backlit Effects - Thrash"
+APP_NAME = "Thrash Lightening Control"
+STARTUP_TASK_NAME = APP_NAME
+STARTUP_RUN_VALUE = APP_NAME
 STARTUP_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 
@@ -156,7 +157,7 @@ def _create_startup_task():
     user_id = f"{domain}\\{username}" if domain else username
     task_xml = f'''<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo><Description>Starts Lenovo LOQ Backlit Effects in the notification area.</Description></RegistrationInfo>
+  <RegistrationInfo><Description>Starts Thrash Lightening Control in the notification area.</Description></RegistrationInfo>
   <Principals>
     <Principal id="Author">
       <UserId>{xml_escape(user_id)}</UserId>
@@ -874,18 +875,32 @@ class EffectEngine:
         self._render_intensity(self.intensity)
         return self._wait(1.0 / 60.0)
 
+    @staticmethod
+    def _breathe_envelope(phase):
+        """Gentle 0→1→0 curve with soft shoulders and no abrupt level jumps."""
+        phase = max(0.0, min(1.0, float(phase)))
+        return math.sin(math.pi * phase) ** 2.2
+
     def _breathe(self):
-        """Continuous sine breathing rendered at 60 Hz over native levels."""
-        cycle = 4.2 / self.speed
+        """Stable high-rate pulse-density breathe for Lenovo's 3 native levels."""
+        cycle = 5.6 / self.speed
+        frame = 1.0 / 96.0
         started = time.monotonic()
+        deadline = started
+        previous_cycle = -1
         while self.running:
-            phase = ((time.monotonic() - started) % cycle) / cycle
-            envelope = 0.5 - 0.5 * math.cos(phase * math.tau)
-            # A small gamma lift avoids spending too long visually black.
-            envelope = envelope ** 0.72
-            self._render_intensity(self.intensity * envelope)
-            if self._wait(1.0 / 60.0):
+            now = time.monotonic()
+            cycle_index = int((now - started) / cycle)
+            if cycle_index != previous_cycle:
+                self._pdm_error = 0.0
+                previous_cycle = cycle_index
+            phase = ((now - started) % cycle) / cycle
+            self._render_intensity(self.intensity * self._breathe_envelope(phase))
+            deadline += frame
+            if self._wait(max(0.001, deadline - time.monotonic())):
                 return True
+            if time.monotonic() - deadline > frame * 3:
+                deadline = time.monotonic()
         return True
 
     def _heartbeat(self):
@@ -1149,27 +1164,33 @@ class EffectCard(QAbstractButton):
         painter.setRenderHint(QPainter.Antialiasing)
         rect = QRectF(self.rect()).adjusted(0.75, 0.75, -0.75, -0.75)
         god_mode = bool(getattr(self.window(), "god_mode", False))
+        light_mode = getattr(self.window(), "appearance_mode", "dark") == "light"
+        accent = QColor(getattr(self.window(), "active_accent", "#42c8ff"))
 
         if self.isChecked():
             background = QLinearGradient(rect.topLeft(), rect.bottomRight())
-            background.setColorAt(0.0, QColor("#4b1018") if god_mode else QColor("#123a51"))
-            background.setColorAt(1.0, QColor("#21090e") if god_mode else QColor("#0b2638"))
-            border = QColor("#ff4d5f") if god_mode else QColor("#55c9ff")
-            name_color = QColor("#f5fbff")
-            desc_color = QColor("#ffc0c7") if god_mode else QColor("#a9daf2")
-            icon_color = QColor("#ff6575") if god_mode else QColor("#67d3ff")
+            selected_top = QColor(accent)
+            selected_top.setAlpha(92 if light_mode else 88)
+            selected_bottom = QColor("#ffffff" if light_mode else "#07131e")
+            selected_bottom.setAlpha(205 if light_mode else 235)
+            background.setColorAt(0.0, QColor("#4b1018") if god_mode else selected_top)
+            background.setColorAt(1.0, QColor("#21090e") if god_mode else selected_bottom)
+            border = QColor("#ff4d5f") if god_mode else accent
+            name_color = QColor("#132235" if light_mode else "#f5fbff")
+            desc_color = QColor("#7e2230" if light_mode and god_mode else "#45647b" if light_mode else "#ffc0c7" if god_mode else "#a9daf2")
+            icon_color = QColor("#ff6575") if god_mode else accent
         elif self.underMouse():
-            background = QColor(23, 36, 53, 248)
-            border = QColor(62, 115, 153)
-            name_color = QColor("#f3f8fc")
-            desc_color = QColor("#aebfd0")
-            icon_color = QColor("#75d6ff")
+            background = QColor(255, 255, 255, 194) if light_mode else QColor(23, 36, 53, 194)
+            border = accent
+            name_color = QColor("#152438" if light_mode else "#f3f8fc")
+            desc_color = QColor("#526b7e" if light_mode else "#aebfd0")
+            icon_color = accent
         else:
-            background = QColor(15, 24, 37, 238)
-            border = QColor(66, 89, 116, 135)
-            name_color = QColor("#e8f0f7")
-            desc_color = QColor("#8fa3b8")
-            icon_color = QColor("#5fc9f5")
+            background = QColor(250, 253, 255, 165) if light_mode else QColor(8, 17, 29, 174)
+            border = QColor(55, 93, 120, 90) if light_mode else QColor(112, 164, 202, 90)
+            name_color = QColor("#17283b" if light_mode else "#e8f0f7")
+            desc_color = QColor("#5c7183" if light_mode else "#8fa3b8")
+            icon_color = accent
 
         painter.setPen(QPen(border, 1.2))
         painter.setBrush(background)
@@ -1192,17 +1213,58 @@ class EffectCard(QAbstractButton):
         painter.end()
 
 
+class AnimatedBrand(QWidget):
+    """Original animated T// wordmark with a restrained moving light sweep."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(48)
+        self._started = time.monotonic()
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self.update)
+        self._timer.start(33)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        window = self.window()
+        light = getattr(window, "appearance_mode", "dark") == "light"
+        animated = getattr(window, "animations_enabled", True)
+        phase = ((time.monotonic() - self._started) * 0.32) % 1.0 if animated else 0.45
+        accent = QColor(getattr(window, "active_accent", "#42c8ff"))
+
+        glow = QColor(accent)
+        glow.setAlpha(int(32 + 28 * math.sin(phase * math.tau) ** 2))
+        painter.setPen(QPen(glow, 7))
+        painter.drawLine(QPointF(12 + phase * 120, 39), QPointF(42 + phase * 120, 39))
+
+        painter.setFont(QFont("Segoe UI Variable Display", 19, QFont.Black))
+        painter.setPen(accent)
+        painter.drawText(QRectF(0, 2, 52, 37), Qt.AlignLeft | Qt.AlignVCenter, "T//")
+        painter.setFont(QFont("Segoe UI Variable Display", 12, QFont.Bold))
+        painter.setPen(QColor("#18283b" if light else "#f5f9fc"))
+        painter.drawText(QRectF(54, 3, self.width() - 54, 36), Qt.AlignLeft | Qt.AlignVCenter, "THRASH")
+        painter.end()
+
+
 class AmbientBackground(QWidget):
     """Animated, resolution-independent background drawn directly by Qt."""
 
     def __init__(self):
         super().__init__()
         self.setObjectName("central")
+        self.appearance_mode = "dark"
+        self.accent = QColor("#42c8ff")
         self._texture = QPixmap(resource_path(os.path.join("assets", "thrash-liquid-glass-v3.png")))
         self._started = time.monotonic()
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.update)
         self._timer.start(40)
+
+    def set_appearance(self, mode, accent):
+        self.appearance_mode = mode
+        self.accent = QColor(accent)
+        self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -1211,9 +1273,14 @@ class AmbientBackground(QWidget):
         phase = time.monotonic() - self._started
 
         base = QLinearGradient(0, 0, width, height)
-        base.setColorAt(0.0, QColor("#05070d"))
-        base.setColorAt(0.52, QColor("#0a101b"))
-        base.setColorAt(1.0, QColor("#070a11"))
+        if self.appearance_mode == "light":
+            base.setColorAt(0.0, QColor("#e7f2f8"))
+            base.setColorAt(0.52, QColor("#f7fbfd"))
+            base.setColorAt(1.0, QColor("#e9eef7"))
+        else:
+            base.setColorAt(0.0, QColor("#05070d"))
+            base.setColorAt(0.52, QColor("#0a101b"))
+            base.setColorAt(1.0, QColor("#070a11"))
         painter.fillRect(self.rect(), base)
 
         if not self._texture.isNull():
@@ -1222,13 +1289,15 @@ class AmbientBackground(QWidget):
             )
             source_x = max(0, (scaled.width() - width) // 2)
             source_y = max(0, (scaled.height() - height) // 2)
-            painter.setOpacity(0.42)
+            painter.setOpacity(0.20 if self.appearance_mode == "light" else 0.52)
             painter.drawPixmap(0, 0, scaled, source_x, source_y, width, height)
             painter.setOpacity(1.0)
 
+        accent_glow = QColor(self.accent)
+        accent_glow.setAlpha(42 if self.appearance_mode == "light" else 70)
         for x, y, radius, color in [
             (width * (0.17 + 0.025 * math.sin(phase * 0.45)), height * 0.10,
-             width * 0.52, QColor(0, 151, 255, 58)),
+             width * 0.52, accent_glow),
             (width * 0.92, height * (0.66 + 0.035 * math.cos(phase * 0.38)),
              width * 0.48, QColor(110, 56, 255, 40)),
         ]:
@@ -1240,7 +1309,9 @@ class AmbientBackground(QWidget):
             painter.fillRect(self.rect(), glow)
 
         # A quiet keyboard-grid motif in the lower background.
-        painter.setPen(QPen(QColor(96, 165, 250, 15), 1))
+        grid_color = QColor(self.accent)
+        grid_color.setAlpha(18 if self.appearance_mode == "dark" else 25)
+        painter.setPen(QPen(grid_color, 1))
         key_w, key_h, gap = 42, 15, 7
         start_x, start_y = width * 0.43, height * 0.78
         for row in range(4):
@@ -1292,7 +1363,7 @@ class BootSplash(QWidget):
         logo_font.setLetterSpacing(QFont.AbsoluteSpacing, 7)
         painter.setFont(logo_font)
         painter.setPen(QColor(235, 247, 255, int(255 * eased)))
-        painter.drawText(QRectF(0, 105, self.width(), 100), Qt.AlignCenter, "LOQ")
+        painter.drawText(QRectF(0, 105, self.width(), 100), Qt.AlignCenter, "T//")
 
         slash_x = self.width() / 2 + 86
         painter.setPen(QPen(QColor(56, 189, 248, int(255 * eased)), 5))
@@ -1302,7 +1373,7 @@ class BootSplash(QWidget):
         painter.setFont(QFont("Segoe UI Variable Text", 10, QFont.Medium))
         painter.setPen(QColor(164, 205, 231, sub_alpha))
         painter.drawText(QRectF(0, 213, self.width(), 34), Qt.AlignCenter,
-                         "BACKLIT EFFECTS  •  BY THRASH")
+                         "LIGHTENING CONTROL  •  THRASH")
 
         track = QRectF(160, 292, 400, 3)
         painter.fillRect(track, QColor(255, 255, 255, 20))
@@ -1326,6 +1397,8 @@ class DesktopApplication(QMainWindow):
         self.effect_buttons = QButtonGroup(self)
         self.react_buttons = QButtonGroup(self)
         self.hold_buttons = QButtonGroup(self)
+        self.appearance_buttons = QButtonGroup(self)
+        self.accent_buttons = QButtonGroup(self)
         self._shown_error = None
         self._entrance_animation = None
         self._has_animated = False
@@ -1812,10 +1885,19 @@ class DesktopApplication(QMainWindow):
         super().__init__()
         self.ctrl = ctrl
         self.engine = effect_engine
-        self.settings = QSettings("Thrash", "Lenovo LOQ Backlit Effects")
+        self.settings = QSettings("Thrash", APP_NAME)
+        legacy_settings = QSettings("Thrash", "Lenovo LOQ Backlit Effects")
+        if not self.settings.contains("settingsMigrated"):
+            for key in ("godMode", "closeToTray", "animations", "intensity", "idleTimeout"):
+                if legacy_settings.contains(key):
+                    self.settings.setValue(key, legacy_settings.value(key))
+            self.settings.setValue("settingsMigrated", True)
         self.god_mode = self.settings.value("godMode", False, type=bool)
         self.close_to_tray = self.settings.value("closeToTray", True, type=bool)
         self.animations_enabled = self.settings.value("animations", True, type=bool)
+        self.appearance_mode = self.settings.value("appearanceMode", "dark", type=str)
+        self.accent_theme = self.settings.value("accentTheme", "cyan", type=str)
+        self.active_accent = "#42c8ff"
         self.intensity = max(1, min(self.settings.value("intensity", 50, type=int), 100))
         self.engine.idle_timeout = max(10, min(self.settings.value("idleTimeout", 30, type=int), 300))
         self.light_on = False
@@ -1823,30 +1905,36 @@ class DesktopApplication(QMainWindow):
         self._quitting = False
         self._tray_notice_shown = False
         self._has_animated = False
+        self._ui_ready = False
+        self._suppress_effect_start = False
         self.effect_buttons = QButtonGroup(self)
         self.nav_buttons = QButtonGroup(self)
         self.react_buttons = QButtonGroup(self)
         self.hold_buttons = QButtonGroup(self)
+        self.appearance_buttons = QButtonGroup(self)
+        self.accent_buttons = QButtonGroup(self)
         self.advanced_widgets = []
         self.cards = {}
         self._build_ui()
         self._build_tray()
         self._apply_god_mode(repaint=True)
-        self._select_effect("battery_saver")
+        self._select_effect("battery_saver", activate=False)
+        self._ui_ready = True
         self.status_timer = QTimer(self)
         self.status_timer.timeout.connect(self._refresh_status)
         self.status_timer.start(250)
         self._refresh_status()
 
     def _build_ui(self):
-        self.setWindowTitle("Lenovo LOQ Backlit Effects - Thrash")
+        self.setWindowTitle(APP_NAME)
         self.setWindowIcon(QIcon(resource_path(os.path.join("assets", "app-icon.png"))))
         self.resize(1280, 820)
         self.setMinimumSize(1040, 700)
         self._set_theme()
-        central = AmbientBackground()
-        self.setCentralWidget(central)
-        root = QHBoxLayout(central)
+        self.background = AmbientBackground()
+        self.background.set_appearance(self.appearance_mode, self.active_accent)
+        self.setCentralWidget(self.background)
+        root = QHBoxLayout(self.background)
         root.setContentsMargins(16, 16, 16, 16)
         root.setSpacing(14)
         root.addWidget(self._make_sidebar())
@@ -1863,36 +1951,50 @@ class DesktopApplication(QMainWindow):
         body.addWidget(self.pages, 1)
         body.addWidget(self._make_action_bar())
         root.addLayout(body, 1)
-        self.god_overlay = GodModeOverlay(central)
+        self.god_overlay = GodModeOverlay(self.background)
 
     def _set_theme(self):
-        accent = "#ff4055" if self.god_mode else "#42c8ff"
-        accent_soft = "#451019" if self.god_mode else "#103c52"
+        accents = {"cyan": "#42c8ff", "violet": "#a78bfa", "amber": "#f59e0b", "emerald": "#34d399"}
+        accent = "#ff4055" if self.god_mode else accents.get(self.accent_theme, accents["cyan"])
+        self.active_accent = accent
+        light = self.appearance_mode == "light"
+        text = "#17283b" if light else "#eaf1f7"
+        title = "#102035" if light else "#fbfdff"
+        muted = "#5b7083" if light else "#92a8bc"
+        panel = "rgba(250,253,255,164)" if light else "rgba(6,14,25,164)"
+        sidebar = "rgba(241,247,251,188)" if light else "rgba(3,8,15,184)"
+        status = "rgba(251,254,255,150)" if light else "rgba(7,15,27,150)"
+        button = "rgba(245,250,253,176)" if light else "rgba(18,31,47,176)"
+        hover = "rgba(255,255,255,220)" if light else "rgba(31,49,69,215)"
+        border = "rgba(55,101,130,72)" if light else "rgba(130,184,220,76)"
+        accent_color = QColor(accent)
+        nav_selected = f"rgba({accent_color.red()},{accent_color.green()},{accent_color.blue()},42)"
         self.setStyleSheet(f"""
-            QMainWindow {{ background: #05070c; }}
-            QWidget {{ color: #eaf1f7; font: 9.5pt 'Segoe UI Variable Text'; }}
+            QMainWindow {{ background: {'#e9f1f6' if light else '#05070c'}; }}
+            QWidget {{ color: {text}; font: 9.5pt 'Segoe UI Variable Text'; }}
             QLabel {{ background: transparent; }}
-            QLabel#title {{ font: 700 25pt 'Bahnschrift SemiCondensed'; color: #fbfdff; }}
-            QLabel#pageTitle {{ font: 650 20pt 'Bahnschrift SemiCondensed'; color: #f7fbff; }}
-            QLabel#section {{ color: {accent}; font: 650 8pt 'Bahnschrift SemiCondensed'; }}
-            QLabel#muted {{ color: #8fa2b5; }}
-            QLabel#brand {{ color: #ffffff; font: 700 13pt 'Bahnschrift SemiCondensed'; }}
-            QLabel#brandSlash {{ color: {accent}; font: 900 18pt 'Bahnschrift SemiCondensed'; }}
-            QFrame#sidebar, QFrame#glass, QGroupBox {{ background: rgba(8, 14, 24, 224);
-                border: 1px solid rgba(113, 151, 184, 62); border-radius: 18px; }}
-            QFrame#sidebar {{ background: rgba(4, 8, 14, 239); }}
-            QFrame#status {{ background: rgba(8, 15, 25, 214); border: 1px solid rgba(95, 142, 174, 65); border-radius: 13px; }}
-            QPushButton {{ background: rgba(24, 35, 50, 238); border: 1px solid rgba(105, 141, 175, 55);
+            QLabel#title {{ font: 700 24pt 'Segoe UI Variable Display'; color: {title}; }}
+            QLabel#pageTitle {{ font: 650 19pt 'Segoe UI Variable Display'; color: {title}; }}
+            QLabel#section {{ color: {accent}; font: 650 8pt 'Segoe UI Variable Text'; }}
+            QLabel#muted {{ color: {muted}; }}
+            QFrame#sidebar, QFrame#glass, QGroupBox {{ background: {panel};
+                border: 1px solid {border}; border-radius: 18px; }}
+            QFrame#sidebar {{ background: {sidebar}; }}
+            QFrame#status {{ background: {status}; border: 1px solid {border}; border-radius: 16px; }}
+            QPushButton {{ background: {button}; border: 1px solid {border};
                 border-radius: 11px; padding: 10px 15px; font: 600 9pt 'Segoe UI Variable Text'; }}
-            QPushButton:hover {{ border-color: {accent}; background: rgba(34, 49, 68, 245); }}
-            QPushButton#nav {{ text-align: left; background: transparent; border: 0; padding: 13px 15px; color: #8fa2b6; }}
-            QPushButton#nav:checked {{ color: #ffffff; background: {accent_soft}; border-left: 3px solid {accent}; }}
+            QPushButton:hover {{ border-color: {accent}; background: {hover}; }}
+            QPushButton#nav {{ text-align: left; background: transparent; border: 0; padding: 13px 15px; color: {muted}; }}
+            QPushButton#nav:checked {{ color: {text}; background: {nav_selected}; border-left: 3px solid {accent}; }}
             QPushButton#primary {{ background: {accent}; color: #05080d; border: 0; font-weight: 750; }}
             QPushButton#primary[running='true'] {{ background: #ff5367; color: #160407; }}
-            QCheckBox {{ spacing: 10px; padding: 6px; color: #c7d3de; }}
-            QCheckBox::indicator {{ width: 18px; height: 18px; border: 1px solid #536b82; border-radius: 6px; background: #0a121e; }}
+            QPushButton#power {{ min-width:44px; max-width:44px; min-height:44px; max-height:44px; padding:0;
+                border-radius:22px; font:700 17pt 'Segoe UI Symbol'; color:{muted}; }}
+            QPushButton#power[powered='true'] {{ background:{accent}; color:#071018; border-color:{accent}; }}
+            QCheckBox {{ spacing: 10px; padding: 6px; color: {text}; }}
+            QCheckBox::indicator {{ width: 18px; height: 18px; border: 1px solid #71869a; border-radius: 6px; background: {button}; }}
             QCheckBox::indicator:checked {{ background: {accent}; border-color: {accent}; }}
-            QRadioButton {{ padding: 6px; color: #c8d5df; }}
+            QRadioButton {{ padding: 6px; color: {text}; }}
             QGroupBox {{ margin-top: 12px; padding: 16px 12px 12px; }}
             QGroupBox::title {{ subcontrol-origin: margin; left: 14px; color: {accent}; padding: 0 6px; }}
             QSlider::groove:horizontal {{ height: 6px; background: #233248; border-radius: 3px; }}
@@ -1903,6 +2005,8 @@ class DesktopApplication(QMainWindow):
             QScrollArea {{ border: 0; background: transparent; }}
             QScrollArea > QWidget > QWidget {{ background: transparent; }}
         """)
+        if hasattr(self, "background"):
+            self.background.set_appearance(self.appearance_mode, self.active_accent)
 
     def _make_sidebar(self):
         sidebar = QFrame()
@@ -1910,16 +2014,9 @@ class DesktopApplication(QMainWindow):
         sidebar.setFixedWidth(206)
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(14, 20, 14, 18)
-        logo = QHBoxLayout()
-        slash = QLabel("T//")
-        slash.setObjectName("brandSlash")
-        word = QLabel("THRASH")
-        word.setObjectName("brand")
-        logo.addWidget(slash)
-        logo.addWidget(word)
-        logo.addStretch()
-        layout.addLayout(logo)
-        edition = QLabel("LOQ LIGHTING LAB")
+        self.animated_brand = AnimatedBrand(self)
+        layout.addWidget(self.animated_brand)
+        edition = QLabel("LIGHTENING CONTROL")
         edition.setObjectName("muted")
         layout.addWidget(edition)
         layout.addSpacing(24)
@@ -1948,7 +2045,7 @@ class DesktopApplication(QMainWindow):
         row = QHBoxLayout(panel)
         row.setContentsMargins(18, 13, 18, 13)
         titles = QVBoxLayout()
-        title = QLabel("LENOVO LOQ BACKLIT EFFECTS")
+        title = QLabel("THRASH LIGHTENING CONTROL")
         title.setObjectName("title")
         subtitle = QLabel("Native white-backlight control  •  private and local")
         subtitle.setObjectName("muted")
@@ -1964,6 +2061,14 @@ class DesktopApplication(QMainWindow):
         row.addWidget(self.method_label)
         row.addSpacing(16)
         row.addWidget(self.state_label)
+        row.addSpacing(10)
+        self.power_button = QPushButton("⏻")
+        self.power_button.setObjectName("power")
+        self.power_button.setProperty("powered", False)
+        self.power_button.setToolTip("Turn the selected lighting effect on or off")
+        self.power_button.setAccessibleName("Lighting power")
+        self.power_button.clicked.connect(self.toggle_power)
+        row.addWidget(self.power_button)
         return panel
 
     def _scroll_page(self, content):
@@ -2091,6 +2196,31 @@ class DesktopApplication(QMainWindow):
 
     def _settings_page(self):
         page, layout = self._page("SETTINGS", "Simple by default. Experimental controls unlock only when requested.")
+        appearance = QGroupBox("APPEARANCE  /  GLASS THEMES")
+        appearance_layout = QVBoxLayout(appearance)
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("MODE"))
+        for value, label in [("dark", "Dark"), ("light", "Light")]:
+            option = QRadioButton(label.upper())
+            option.setProperty("appearance_value", value)
+            option.setChecked(self.appearance_mode == value)
+            option.toggled.connect(self._appearance_changed)
+            self.appearance_buttons.addButton(option)
+            mode_row.addWidget(option)
+        mode_row.addStretch()
+        appearance_layout.addLayout(mode_row)
+        accent_row = QHBoxLayout()
+        accent_row.addWidget(QLabel("ACCENT"))
+        for value, label in [("cyan", "Ion"), ("violet", "Nova"), ("amber", "Solar"), ("emerald", "Matrix")]:
+            option = QRadioButton(label.upper())
+            option.setProperty("accent_value", value)
+            option.setChecked(self.accent_theme == value)
+            option.toggled.connect(self._accent_changed)
+            self.accent_buttons.addButton(option)
+            accent_row.addWidget(option)
+        accent_row.addStretch()
+        appearance_layout.addLayout(accent_row)
+        layout.addWidget(appearance)
         panel = QFrame()
         panel.setObjectName("glass")
         settings_layout = QVBoxLayout(panel)
@@ -2134,11 +2264,11 @@ class DesktopApplication(QMainWindow):
         return page
 
     def _about_page(self):
-        page, layout = self._page("ABOUT", f"Lenovo LOQ Backlit Effects - Thrash  •  Version {APP_VERSION}")
+        page, layout = self._page("ABOUT", f"{APP_NAME}  •  Version {APP_VERSION}")
         panel = QFrame()
         panel.setObjectName("glass")
         box = QVBoxLayout(panel)
-        title = QLabel("T//  THRASH LIGHTING LAB")
+        title = QLabel("T//  THRASH LIGHTENING CONTROL")
         title.setObjectName("title")
         body = QLabel(
             "A community-built controller for compatible Lenovo LOQ white-backlit keyboards.\n\n"
@@ -2170,29 +2300,28 @@ class DesktopApplication(QMainWindow):
         self.intensity_slider.valueChanged.connect(self._intensity_changed)
         self.intensity_value = QLabel(f"{self.intensity}%")
         self.intensity_value.setFixedWidth(45)
-        self.start_button = QPushButton("START MODE")
-        self.start_button.setObjectName("primary")
-        self.start_button.clicked.connect(self.toggle_effect)
-        light = QPushButton("LIGHT ON / OFF")
-        light.clicked.connect(self.toggle_light)
         row.addWidget(self.intensity_slider, 1)
         row.addWidget(self.intensity_value)
-        row.addSpacing(8)
-        row.addWidget(self.start_button)
-        row.addWidget(light)
+        hint = QLabel("SELECT AN EFFECT TO APPLY IT INSTANTLY")
+        hint.setObjectName("muted")
+        row.addSpacing(16)
+        row.addWidget(hint)
         return panel
 
     def _build_tray(self):
         self.tray_icon = QSystemTrayIcon(self.windowIcon(), self)
-        self.tray_icon.setToolTip("Lenovo LOQ Backlit Effects - Thrash")
+        self.tray_icon.setToolTip(APP_NAME)
         menu = QMenu()
-        open_action = QAction("Open Lighting Lab", self)
+        open_action = QAction(f"Open {APP_NAME}", self)
         open_action.triggered.connect(self._restore_from_tray)
+        power_action = QAction("Toggle Lighting Power", self)
+        power_action.triggered.connect(self.toggle_power)
         battery_action = QAction("Arm Battery Saver", self)
         battery_action.triggered.connect(self.arm_startup_battery_saver)
         quit_action = QAction("Quit", self)
         quit_action.triggered.connect(self._quit_application)
         menu.addAction(open_action)
+        menu.addAction(power_action)
         menu.addAction(battery_action)
         menu.addSeparator()
         menu.addAction(quit_action)
@@ -2200,11 +2329,13 @@ class DesktopApplication(QMainWindow):
         self.tray_icon.activated.connect(self._tray_activated)
         self.tray_icon.show()
 
-    def _select_effect(self, effect_id):
+    def _select_effect(self, effect_id, activate=False):
         card = self.cards.get(effect_id)
         if card:
+            self._suppress_effect_start = not activate
             card.setChecked(True)
             self._effect_changed()
+            self._suppress_effect_start = False
 
     def selected_effect(self):
         button = self.effect_buttons.checkedButton()
@@ -2219,6 +2350,8 @@ class DesktopApplication(QMainWindow):
             if effect == "music_mic" else
             "SPEAKER MODE uses Windows loopback output and adaptive beat transients—not the microphone."
         )
+        if self._ui_ready and not self._suppress_effect_start:
+            self.start_effect()
 
     def _speed_changed(self, value):
         self.speed_label.setText(f"{value / 10:.1f}×")
@@ -2267,6 +2400,29 @@ class DesktopApplication(QMainWindow):
         self.animations_enabled = bool(enabled)
         self.settings.setValue("animations", self.animations_enabled)
 
+    def _appearance_changed(self, checked):
+        if not checked:
+            return
+        sender = self.sender()
+        self.appearance_mode = sender.property("appearance_value")
+        self.settings.setValue("appearanceMode", self.appearance_mode)
+        self._refresh_appearance()
+
+    def _accent_changed(self, checked):
+        if not checked:
+            return
+        sender = self.sender()
+        self.accent_theme = sender.property("accent_value")
+        self.settings.setValue("accentTheme", self.accent_theme)
+        self._refresh_appearance()
+
+    def _refresh_appearance(self):
+        self._set_theme()
+        for card in self.cards.values():
+            card.update()
+        if hasattr(self, "animated_brand"):
+            self.animated_brand.update()
+
     def _reset_defaults(self):
         self.god_checkbox.setChecked(False)
         self.tray_checkbox.setChecked(True)
@@ -2276,6 +2432,12 @@ class DesktopApplication(QMainWindow):
         self.speed_slider.setValue(10)
         self.react_buttons.button(2).setChecked(True)
         self.hold_buttons.button(2).setChecked(True)
+        for button in self.appearance_buttons.buttons():
+            if button.property("appearance_value") == "dark":
+                button.setChecked(True)
+        for button in self.accent_buttons.buttons():
+            if button.property("accent_value") == "cyan":
+                button.setChecked(True)
         self.state_label.setText("DEFAULTS RESTORED")
 
     def start_effect(self, start_asleep=False):
@@ -2291,42 +2453,48 @@ class DesktopApplication(QMainWindow):
                               hold_behavior=hold, start_asleep=start_asleep)
             name = next(item["name"] for item in EffectEngine.EFFECTS_META if item["id"] == effect)
             self.state_label.setText(f"ACTIVE  /  {name.upper()}")
-            self.start_button.setText("STOP MODE")
-            self.start_button.setProperty("running", True)
-            self.start_button.style().unpolish(self.start_button)
-            self.start_button.style().polish(self.start_button)
+            self.light_on = True
+            self._set_power_visual(True)
             return True
         except Exception as exc:
+            self._set_power_visual(False)
             QMessageBox.critical(self, "Could not start effect", str(exc))
             return False
 
     def arm_startup_battery_saver(self):
-        self._select_effect("battery_saver")
+        self._select_effect("battery_saver", activate=False)
         self.ctrl.set_brightness(0)
         self.light_on = False
         self.start_effect(start_asleep=True)
 
-    def stop_effect(self):
-        self.engine.stop()
-        self.state_label.setText("READY")
-        self.start_button.setText("START MODE")
-        self.start_button.setProperty("running", False)
-        self.start_button.style().unpolish(self.start_button)
-        self.start_button.style().polish(self.start_button)
+    def _set_power_visual(self, powered):
+        if not hasattr(self, "power_button"):
+            return
+        self.power_button.setProperty("powered", bool(powered))
+        self.power_button.style().unpolish(self.power_button)
+        self.power_button.style().polish(self.power_button)
+
+    def stop_effect(self, power_off=True):
+        self.engine.stop(restore=not power_off)
+        if power_off:
+            self.ctrl.set_brightness(0)
+            self.light_on = False
+            self.state_label.setText("POWER  /  OFF")
+        else:
+            self.state_label.setText("READY")
+        self._set_power_visual(False)
 
     def toggle_effect(self):
-        self.stop_effect() if self.engine.running else self.start_effect()
+        self.toggle_power()
+
+    def toggle_power(self):
+        if self.engine.running or self.light_on:
+            self.stop_effect(power_off=True)
+        else:
+            self.start_effect()
 
     def toggle_light(self):
-        if self.engine.running:
-            self.stop_effect()
-        self.light_on = not self.light_on
-        target = max(1, int(round((self.intensity / 100.0) * self.ctrl.max_level))) if self.light_on else 0
-        target = min(self.ctrl.max_level, target)
-        if self.ctrl.set_brightness(target):
-            self.state_label.setText("LIGHT  /  ON" if self.light_on else "LIGHT  /  OFF")
-        else:
-            QMessageBox.warning(self, "Controller unavailable", "The keyboard command was not accepted.")
+        self.toggle_power()
 
     def redetect(self):
         if self.engine.running:
@@ -2337,7 +2505,7 @@ class DesktopApplication(QMainWindow):
     def _copy_diagnostics(self):
         status = self.ctrl.get_status()
         lines = [
-            f"Lenovo LOQ Backlit Effects - Thrash {APP_VERSION}",
+            f"{APP_NAME} {APP_VERSION}",
             f"System: {status.get('system_model', 'Unknown')}",
             f"Bridge: {status.get('method_display', 'Unknown')}",
             f"Capability: {status.get('backlight_level_type', 'Unknown')}",
@@ -2391,10 +2559,11 @@ class DesktopApplication(QMainWindow):
                 self.state_label.setText(f"BATTERY SAVER  /  SLEEP IN {remaining}s")
         if self.engine.last_error and self.engine.last_error != self._shown_error:
             self._shown_error = self.engine.last_error
+            self.light_on = False
+            self._set_power_visual(False)
             QMessageBox.warning(self, "Effect stopped", self.engine.last_error)
-        if not self.engine.running and self.start_button.property("running"):
-            self.start_button.setText("START MODE")
-            self.start_button.setProperty("running", False)
+        if not self.engine.running and self.power_button.property("powered") and not self.light_on:
+            self._set_power_visual(False)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -2482,8 +2651,8 @@ if __name__ == "__main__":
         sys.argv.remove("--startup")
 
     qt_app = QApplication(sys.argv)
-    qt_app.setApplicationName("Lenovo LOQ Backlit Effects - Thrash")
-    qt_app.setApplicationDisplayName("Lenovo LOQ Backlit Effects - Thrash")
+    qt_app.setApplicationName(APP_NAME)
+    qt_app.setApplicationDisplayName(APP_NAME)
     qt_app.setApplicationVersion(APP_VERSION)
     qt_app.setOrganizationName("Thrash")
     qt_app.setWindowIcon(QIcon(resource_path(os.path.join("assets", "app-icon.png"))))

@@ -1,4 +1,4 @@
-# PyInstaller build specification for Lenovo LOQ Keyboard Effects Lab.
+# PyInstaller build specification for Thrash Lightening Control.
 # Build on Windows with: pyinstaller --clean --noconfirm keyboard-effects.spec
 
 a = Analysis(
@@ -25,7 +25,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="LenovoLOQBacklitEffects-Thrash",
+    name="ThrashLighteningControl",
     version="version_info.txt",
     icon="assets/app.ico",
     debug=False,

@@ -23,7 +23,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="LenovoLOQBacklitEffects-Thrash",
+    name="ThrashLighteningControl",
     version="version_info.txt",
     icon="assets/app.ico",
     debug=False,
@@ -46,5 +46,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name="LenovoLOQBacklitEffects-Thrash",
+    name="ThrashLighteningControl",
 )
